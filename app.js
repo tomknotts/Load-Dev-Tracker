@@ -68,6 +68,12 @@ async function migrate() {
     S.cfg.libMig = 2;
     await saveCfg();
   }
+  if (!(S.cfg.libMig >= 3)) { // fill bullet caliber from its diameter so existing bullets sort into the right rifles
+    const byDia = { 0.224: '.223', 0.243: '6mm', 0.264: '6.5mm', 0.277: '.270', 0.284: '7mm', 0.308: '.308', 0.311: '.303', 0.338: '.338', 0.451: '.45', 0.452: '.45' };
+    for (const b of S.bullets) if (!b.caliber && fin(b.diameter) && byDia[b.diameter]) await put('bullets', { ...b, caliber: byDia[b.diameter] });
+    S.cfg.libMig = 3;
+    await saveCfg();
+  }
 }
 async function put(s, o) {
   await rp(store(s, 'readwrite').put(o));
@@ -194,7 +200,12 @@ const nm = (s, id) => (byId(s, id) || {}).name || '?';
 const comboLabel = (c) => `${bl(c.bulletId)} · ${nm('powders', c.powderId)} ${c.charge} gn · ${nm('primers', c.primerId)} · ${c.jump} thou`;
 
 /* ---------- UI plumbing ---------- */
-const bar = (left, title, right = '') => { $('#bar').innerHTML = `${left || '<span style="min-width:64px"></span>'}<div class="t">${esc(title)}</div>${right || '<span style="min-width:64px"></span>'}`; };
+// With rid, the middle of the bar shows the rifle name (tap = that rifle's main page) and the page name underneath.
+const bar = (left, title, right = '', rid = null) => {
+  const r = rid && byId('rifles', rid);
+  const mid = r ? `<a class="t" href="#/rifle/${rid}">${esc(r.name)}<small>${esc(title)}</small></a>` : `<div class="t">${esc(title)}</div>`;
+  $('#bar').innerHTML = `${left || '<span style="min-width:64px"></span>'}${mid}${right || '<span style="min-width:64px"></span>'}`;
+};
 const main = (h) => { $('#main').innerHTML = h; window.scrollTo(0, 0); };
 const back = (href, label) => `<a href="${href}">← ${esc(label)}</a>`;
 const opts = (list, sel, lab, blank) => (blank ? `<option value="">${esc(blank)}</option>` : '') + list.map((x) => `<option value="${esc(x.id)}"${x.id === sel ? ' selected' : ''}>${esc(lab(x))}</option>`).join('');
@@ -245,7 +256,7 @@ function viewHome() {
 function rifleForm(r) {
   formDialog(r ? 'Edit rifle' : 'New rifle', [
     { k: 'name', label: 'Name / label', req: true },
-    { k: 'caliber', label: 'Caliber' },
+    { k: 'caliber', label: 'Caliber', list: caliberList() },
     { k: 'barrel', label: 'Barrel length (in)', type: 'num' },
     { k: 'startRounds', label: 'Rounds already through barrel', type: 'num' }
   ], r || { caliber: '.308 Win' }, async (v) => {
@@ -261,14 +272,22 @@ function rifleForm(r) {
   } : null);
 }
 
+const comboHref = (c) => `#/combo/${c.groups[0].rifleId}/${encodeURIComponent(c.key)}`;
+function groupCard(g, showSess) {
+  const s = gstats(g);
+  return `<a class="card ${g.include === false ? 'excl' : ''}" href="#/group/${g.id}">
+    <div class="row sb"><b>${esc(nm('powders', g.powderId))} ${g.charge} gn</b>${g.include === false ? '<span class="tag a">Excluded</span>' : g.reference ? '<span class="tag g">Ref</span>' : ''}</div>
+    <div class="muted">${showSess && sessOf(g) ? esc(sessionLabel(sessOf(g))) + ' · ' : ''}${esc(bl(g.bulletId))} · ${esc(nm('primers', g.primerId))} · ${g.jump} thou · RSC ${roundsSinceClean(g) ?? '—'}</div>
+    <div class="grid3"><div><div class="lbl">MR</div><span class="mono v">${fmt(s.mr)}</span></div><div><div class="lbl">ES</div><span class="mono v">${fmt(s.es)}</span></div><div><div class="lbl">Shots</div><span class="mono v">${s.total}</span></div></div></a>`;
+}
 function comboRow(c, best) {
   const ranked = c.nGroups >= 2;
-  return `<div class="card" ${best ? 'style="border:2px solid var(--green)"' : ''}>
+  return `<a class="card" href="${comboHref(c)}" ${best ? 'style="border:2px solid var(--green)"' : ''}>
     <b>${esc(comboLabel(c))}</b>
     <div class="grid4"><div><div class="lbl">Grp</div><span class="mono v">${c.nGroups}</span></div><div><div class="lbl">Shots</div><span class="mono v">${c.nShots}</span></div>
     <div><div class="lbl">MR</div><span class="mono v">${fmt(c.mr)}</span></div><div><div class="lbl">Vel</div><span class="mono v">${fin(c.vel) ? Math.round(c.vel) : '—'}</span></div></div>
     <div class="muted">ES ${fmt(c.es)}" (average of each group's calculated ES) · MR weighted by shots</div>
-    ${ranked ? '' : '<div class="warn">Not enough data yet — needs 2+ groups</div>'}</div>`;
+    ${ranked ? '' : '<div class="warn">Not enough data yet — needs 2+ groups</div>'}<div class="muted">Tap to see its groups →</div></a>`;
 }
 
 function viewRifle(rid) {
@@ -281,16 +300,16 @@ function viewRifle(rid) {
   const t = rifleTotals(rid);
   const latest = latestSession(rid);
   main(`<div class="muted">${esc(r.caliber || '')}${r.barrel ? ' · ' + r.barrel + ' in barrel' : ''}</div>
-    <div class="hero"><div class="lbl">Current best load</div>
-    ${best ? `<div style="font-size:19px;font-weight:600">${esc(bl(best.bulletId))} · ${esc(nm('powders', best.powderId))}</div>
+    ${best ? `<a class="hero" href="${comboHref(best)}"><div class="lbl">Current best load</div><div style="font-size:19px;font-weight:600">${esc(bl(best.bulletId))} · ${esc(nm('powders', best.powderId))}</div>
       <div class="mono">${best.charge} gn · ${esc(nm('primers', best.primerId))} · ${best.jump} thou jump</div>
-      <div class="big mono">${fmt(best.mr)}"</div><div>pooled mean radius · ${best.nGroups} groups · ${best.nShots} shots</div>`
-      : `<div style="font-size:19px;font-weight:600">Not enough data yet</div><div>Needs 2+ groups at the exact same Bullet + Powder + Charge + Primer + Jump.</div>`}</div>
+      <div class="big mono">${fmt(best.mr)}"</div><div>pooled mean radius · ${best.nGroups} groups · ${best.nShots} shots</div><div style="opacity:.85;font-size:13px">Tap to see its groups →</div></a>`
+      : `<div class="hero"><div class="lbl">Current best load</div><div style="font-size:19px;font-weight:600">Not enough data yet</div><div>Needs 2+ groups at the exact same Bullet + Powder + Charge + Primer + Jump.</div></div>`}
     <div class="grid2"><div class="card"><div class="lbl">Shots logged</div><div class="mono v" style="font-size:30px">${t.shots}</div></div>
     <div class="card"><div class="lbl">Barrel total</div><div class="mono v" style="font-size:30px">${t.barrel}</div><div class="muted">${t.start} start + ${t.shots} logged + ${t.fouling} fouling</div></div></div>
-    ${latest ? `<div class="card"><div class="lbl">Current session</div><div class="row sb"><b>${esc(sessionLabel(latest))}</b><span class="mono">${fin(latest.fouling) ? latest.fouling : 0} fouling · ${groupsOf(latest.id).length} grp</span></div></div>` : ''}
+    ${latest ? `<a class="card" href="#/session/${latest.id}"><div class="lbl">Current session · tap to open</div><div class="row sb"><b>${esc(sessionLabel(latest))}</b><span class="mono">${fin(latest.fouling) ? latest.fouling : 0} fouling · ${groupsOf(latest.id).length} grp</span></div></a>` : ''}
     ${latest ? `<a class="btn dark" href="#/add/${rid}">+ Add New Group</a>` : ''}
     <button class="btn ${latest ? '' : 'dark'}" data-act="new-session" data-id="${rid}">+ Start New Session</button>
+    <a class="btn" href="#/sessions/${rid}">View Session Data</a>
     <a class="btn" href="#/all/${rid}">View All Data</a>
     ${cs.length ? `<h2>Combos · pooled (Include = Y only)</h2>${cs.map((c) => comboRow(c, c === best)).join('')}` : ''}`);
 }
@@ -299,7 +318,7 @@ function viewAll(rid) {
   const r = byId('rifles', rid);
   if (!r) return viewHome();
   if (F.rid !== rid) F = { rid, powder: '', bullet: '', primer: '', charge: '', jump: '' };
-  bar(back('#/rifle/' + rid, r.name), 'All Data');
+  bar(back('#/rifle/' + rid, 'Back'), 'All Data', '', rid);
   const all = S.groups.filter((g) => g.rifleId === rid);
   const gs = all.filter((g) => (!F.powder || g.powderId === F.powder) && (!F.bullet || g.bulletId === F.bullet) && (!F.primer || g.primerId === F.primer) &&
     (!F.charge || String(Number(g.charge)) === F.charge) && (!F.jump || String(Number(g.jump)) === F.jump));
@@ -307,19 +326,12 @@ function viewAll(rid) {
   const dist = (k) => [...new Set(all.map((g) => String(Number(g[k]))))].sort((a, b) => a - b);
   const sel = (key, label, inner) => `<div class="f"><label class="lbl" for="F-${key}">${label}</label><select class="in" style="min-height:48px;font-size:16px" id="F-${key}" data-filter="${key}">${inner}</select></div>`;
   const filtering = !!(F.powder || F.bullet || F.primer || F.charge || F.jump);
-  const groupCard = (g) => {
-    const s = gstats(g);
-    return `<a class="card ${g.include === false ? 'excl' : ''}" href="#/group/${g.id}">
-      <div class="row sb"><b>${esc(nm('powders', g.powderId))} ${g.charge} gn</b>${g.include === false ? '<span class="tag a">Excluded</span>' : g.reference ? '<span class="tag g">Ref</span>' : ''}</div>
-      <div class="muted">${esc(bl(g.bulletId))} · ${esc(nm('primers', g.primerId))} · ${g.jump} thou · RSC ${roundsSinceClean(g) ?? '—'}</div>
-      <div class="grid3"><div><div class="lbl">MR</div><span class="mono v">${fmt(s.mr)}</span></div><div><div class="lbl">ES</div><span class="mono v">${fmt(s.es)}</span></div><div><div class="lbl">Shots</div><span class="mono v">${s.total}</span></div></div></a>`;
-  };
   const list = sessionsOf(rid).sort((a, b) => b.date.localeCompare(a.date) || b.ts - a.ts).map((se) => {
     const mine = gs.filter((g) => g.sessionId === se.id).sort((a, b) => a.ts - b.ts);
     if (filtering && !mine.length) return '';
     return `<div class="row sb" style="margin-top:6px"><div><b>${esc(sessionLabel(se))}</b><div class="muted">${fin(se.fouling) ? se.fouling : 0} fouling${fin(se.temp) ? ' · ' + se.temp + ' F' : ''}${se.wind ? ' · ' + esc(se.wind) : ''}</div></div>
       <button class="btn sm" data-act="edit-session" data-id="${se.id}">Edit session</button></div>
-      ${mine.length ? mine.map(groupCard).join('') : '<div class="card muted">No groups in this session yet.</div>'}`;
+      ${mine.length ? mine.map((g) => groupCard(g)).join('') : '<div class="card muted">No groups in this session yet.</div>'}`;
   }).join('');
   const cs = combos(gs);
   const hist = S.hist.filter((h) => h.rifleId === rid);
@@ -342,10 +354,72 @@ function viewAll(rid) {
     <button class="btn" data-act="new-hist" data-id="${rid}">+ Add historical entry</button>`);
 }
 
+const newest = (a, b) => b.date.localeCompare(a.date) || b.ts - a.ts;
+const sessMeta = (se) => `${fin(se.fouling) ? se.fouling : 0} fouling${fin(se.temp) ? ' · ' + se.temp + ' F' : ''}${se.wind ? ' · ' + esc(se.wind) : ''}`;
+
+function viewSessions(rid) {
+  const r = byId('rifles', rid);
+  if (!r) return viewHome();
+  bar(back('#/rifle/' + rid, 'Back'), 'Sessions', '', rid);
+  const list = sessionsOf(rid).sort(newest).map((se) => {
+    const gs = groupsOf(se.id);
+    return `<a class="card" href="#/session/${se.id}"><div class="row sb"><b>${esc(sessionLabel(se))}</b><span class="mono">${gs.length} grp · ${gs.reduce((a, g) => a + g.shots.length, 0)} shots</span></div><div class="muted">${sessMeta(se)}</div></a>`;
+  }).join('');
+  main(`<h1>Sessions</h1>${list || '<div class="card muted">No sessions yet.</div>'}
+    <button class="btn dark" data-act="new-session" data-id="${rid}">+ Start New Session</button>`);
+}
+
+function viewSession(sid) {
+  const se = byId('sessions', sid);
+  if (!se) return viewHome();
+  const rid = se.rifleId, gs = groupsOf(sid);
+  const shots = gs.reduce((a, g) => a + g.shots.length, 0);
+  const cs = combos(gs);
+  bar(back('#/sessions/' + rid, 'Sessions'), 'Session · ' + se.date, `<button class="r" data-act="edit-session" data-id="${sid}">Edit</button>`, rid);
+  main(`<div><h1 style="font-size:24px">${esc(sessionLabel(se))}</h1><div class="muted">${sessMeta(se)}</div></div>
+    <div class="grid3"><div class="card"><div class="lbl">Groups</div><span class="mono v">${gs.length}</span></div>
+    <div class="card"><div class="lbl">Shots</div><span class="mono v">${shots}</span></div>
+    <div class="card"><div class="lbl">Since clean</div><span class="mono v">${(fin(se.fouling) ? se.fouling : 0) + shots}</span></div></div>
+    <a class="btn dark" href="#/add/${sid}">+ Add Group to this session</a>
+    <h2>Groups · in the order fired</h2>
+    ${gs.length ? gs.map((g) => groupCard(g)).join('') : '<div class="card muted">No groups in this session yet.</div>'}
+    ${cs.length ? `<h2>Loads in this session · pooled across all sessions</h2>${cs.map((c) => comboRow(c, false)).join('')}` : ''}`);
+}
+
+function viewCombo(rid, key) {
+  const r = byId('rifles', rid);
+  const gs = S.groups.filter((g) => g.rifleId === rid && ckey(g) === key)
+    .sort((a, b) => (sessOf(b) ? sessOf(b).date : '').localeCompare(sessOf(a) ? sessOf(a).date : '') || b.ts - a.ts);
+  if (!r || !gs.length) return viewHome();
+  bar(back('#/rifle/' + rid, 'Back'), 'Load', '', rid);
+  const c = combos(gs)[0];
+  const excl = gs.filter((g) => g.include === false).length;
+  main(`<div><h1 style="font-size:22px">${esc(comboLabel(gs[0]))}</h1></div>
+    ${c ? `<div class="hero"><div class="grid2"><div><div class="lbl">Pooled mean radius</div><div class="big mono">${fmt(c.mr)}"</div></div>
+      <div><div class="lbl">Avg ES</div><div class="big mono">${fmt(c.es)}"</div></div></div>
+      <div>${c.nGroups} group${c.nGroups === 1 ? '' : 's'} · ${c.nShots} shots · avg velocity ${fin(c.vel) ? Math.round(c.vel) : '—'} fps</div>
+      ${c.nGroups < 2 ? '<div style="font-weight:600">Not enough data yet — needs 2+ groups to rank</div>' : ''}</div>`
+      : '<div class="card warn">Every group of this load is excluded from analysis, so there are no pooled stats.</div>'}
+    <div class="muted">Pooled mean radius is weighted by shots and counts only groups with Include = Y. ES is the average of each group's calculated ES.${excl ? ` ${excl} excluded group${excl === 1 ? ' is' : 's are'} shown dimmed below.` : ''}</div>
+    <h2>All groups with this load</h2>
+    ${gs.map((g) => groupCard(g, true)).join('')}`);
+}
+
+/* bullets are filtered by the rifle's caliber; a bullet with no caliber set always shows */
+const calNorm = (s) => String(s || '').toLowerCase().replace(/^\./, '').replace(/\s+/g, ' ').trim();
+const calMatch = (a, b) => { a = calNorm(a); b = calNorm(b); return !!a && !!b && (a.startsWith(b) || b.startsWith(a)); };
+function bulletsFor(rid, keepId) {
+  const r = byId('rifles', rid);
+  if (!r || !calNorm(r.caliber)) return S.bullets;
+  const list = S.bullets.filter((b) => !calNorm(b.caliber) || calMatch(b.caliber, r.caliber) || b.id === keepId);
+  return list.length ? list : S.bullets;
+}
+const caliberList = () => [...new Set(['.223', '6mm', '6.5mm', '.270', '7mm', '.308', '.30-06', '.338', '.45', ...S.bullets.map((b) => b.caliber).filter(Boolean)])];
+
 function histForm(rid, h) {
   if (!S.bullets.length || !S.powders.length) { toast('Add a bullet and powder in Settings first'); return; }
   formDialog(h ? 'Edit historical entry' : 'Historical entry', [
-    { k: 'bulletId', label: 'Bullet', type: 'select', opts: S.bullets.map((b) => [b.id, bl(b.id)]) },
+    { k: 'bulletId', label: 'Bullet', type: 'select', opts: bulletsFor(rid, h && h.bulletId).map((b) => [b.id, bl(b.id)]) },
     { k: 'powderId', label: 'Powder', type: 'select', opts: S.powders.map((p) => [p.id, p.name]) },
     { k: 'charge', label: 'Charge (gn)', type: 'num', req: true },
     { k: 'es', label: 'Extreme spread, manual (in)', type: 'num' },
@@ -376,7 +450,7 @@ function viewGroup(gid) {
   if (!g) return viewHome();
   const s = gstats(g);
   const se = sessOf(g) || {};
-  bar(back('#/all/' + g.rifleId, 'All Data'), gdate(g), `<a class="r" href="#/edit/${gid}">Edit</a>`);
+  bar(back('#/session/' + g.sessionId, 'Session'), 'Group · ' + gdate(g), `<a class="r" href="#/edit/${gid}">Edit</a>`, g.rifleId);
   const sess = groupsOf(g.sessionId);
   main(`<div><h1 style="font-size:24px">${esc(se.id ? sessionLabel(se) : '—')} · Group ${sess.findIndex((x) => x.id === g.id) + 1}</h1>
     <div class="muted">${esc(bl(g.bulletId))} · ${esc(nm('powders', g.powderId))} ${g.charge} gn · ${esc(nm('primers', g.primerId))} · ${g.jump} thou</div>
@@ -417,7 +491,7 @@ function viewGroupForm(rid, gid, fromId, sid) {
   const g0 = gid ? byId('groups', gid) : null;
   const src = g0 || (fromId && byId('groups', fromId)) || S.groups.filter((g) => g.rifleId === rid).sort((a, b) => b.ts - a.ts)[0] || {};
   const missing = !S.bullets.length || !S.powders.length || !S.primers.length;
-  bar(back(g0 ? '#/group/' + gid : '#/rifle/' + rid, g0 ? 'Group' : r.name), g0 ? 'Edit Group' : 'New Group');
+  bar(back(g0 ? '#/group/' + gid : '#/session/' + sid, g0 ? 'Group' : 'Session'), g0 ? 'Edit Group' : 'New Group', '', rid);
   const curSid = g0 ? g0.sessionId : sid;
   const sessOpts = sessionsOf(rid).sort((a, b) => b.date.localeCompare(a.date) || b.ts - a.ts)
     .map((x) => `<option value="${x.id}"${x.id === curSid ? ' selected' : ''}>${esc(sessionLabel(x))} · ${fin(x.fouling) ? x.fouling : 0} fouling</option>`).join('');
@@ -431,7 +505,8 @@ function viewGroupForm(rid, gid, fromId, sid) {
     <div class="f"><label class="lbl" for="f-session">Session</label><select class="in" id="f-session">${sessOpts}</select></div>
     <div class="muted">Date, wind, temp and fouling shots belong to the session. Change them with Edit session on the rifle or group page.</div>
     ${sec('LOAD')}
-    <div class="f"><label class="lbl" for="f-bullet">Bullet</label><select class="in" id="f-bullet">${opts(S.bullets, src.bulletId, (x) => x.name + (fin(x.weight) ? ' ' + x.weight + ' gn' : ''))}</select></div>
+    <div class="f"><label class="lbl" for="f-bullet">Bullet</label><select class="in" id="f-bullet">${opts(bulletsFor(rid, src.bulletId), src.bulletId, (x) => x.name + (fin(x.weight) ? ' ' + x.weight + ' gn' : ''))}</select>
+    <div class="muted">Bullets for ${esc(r.caliber || 'this rifle')}${S.bullets.some((b) => !calNorm(b.caliber)) ? ', plus any with no caliber set' : ''}. Set a bullet's caliber in Settings.</div></div>
     <div class="f"><label class="lbl" for="f-powder">Powder</label><select class="in" id="f-powder">${opts(S.powders, src.powderId, (x) => x.name)}</select></div>
     <div class="grid2">${fld('f-charge', 'Charge (gn)', src.charge)}${fld('f-jump', 'Jump (thou off lands)', src.jump)}</div>
     <div class="f"><label class="lbl" for="f-primer">Primer</label><select class="in" id="f-primer">${opts(S.primers, src.primerId, (x) => x.name)}</select></div>
@@ -524,7 +599,7 @@ function viewSettings() {
     ${S[s].slice().sort((a, b) => a.name.localeCompare(b.name)).map((x) => `<div class="item" role="button" tabindex="0" data-act="lib-edit" data-s="${s}" data-id="${x.id}"><div>${esc(x.name)}${sub(x) ? `<small>${esc(sub(x))}</small>` : ''}</div><span class="muted">Edit</span></div>`).join('') || '<div class="muted">None yet.</div>'}`;
   main(`<h1>Components</h1>
     ${lib('RIFLES', 'rifles', (x) => `${x.caliber || ''}${x.barrel ? ' · ' + x.barrel + ' in' : ''} · start ${x.startRounds || 0} rds`).replace('data-act="lib-new" data-s="rifles"', 'data-act="new-rifle"')}
-    ${lib('BULLETS', 'bullets', (x) => [x.style, fin(x.weight) ? x.weight + ' gn' : '', fin(x.diameter) ? 'dia ' + x.diameter + ' in' : ''].filter(Boolean).join(' · '))}
+    ${lib('BULLETS', 'bullets', (x) => [x.caliber, x.style, fin(x.weight) ? x.weight + ' gn' : '', fin(x.diameter) ? 'dia ' + x.diameter + ' in' : ''].filter(Boolean).join(' · '))}
     ${lib('POWDERS', 'powders', () => '')}
     ${lib('PRIMERS', 'primers', (x) => x.type || '')}
     ${lib('CASES · optional', 'cases', () => '')}
@@ -544,6 +619,7 @@ function viewSettings() {
 
 const LIBS = {
   bullets: [{ k: 'name', label: 'Manufacturer / name', req: true },
+    { k: 'caliber', label: 'Caliber (e.g. .308, 7mm, .45)', list: [] },
     { k: 'style', label: 'Style (bullet shape)', list: ['BTHP', 'BT', 'SP', 'SPBT', 'FMJ', 'FMJBT', 'HP', 'RN', 'SWC', 'Hybrid'] },
     { k: 'weight', label: 'Weight (gn)', type: 'num' }, { k: 'diameter', label: 'Diameter (in)', type: 'num', req: true }],
   powders: [{ k: 'name', label: 'Name', req: true }],
@@ -553,7 +629,7 @@ const LIBS = {
 };
 const USE = { bullets: 'bulletId', powders: 'powderId', primers: 'primerId' };
 function libForm(s, x) {
-  formDialog(x ? 'Edit' : 'Add', LIBS[s], x || (s === 'bullets' ? { diameter: 0.308 } : {}), async (v) => { await put(s, { ...(x || { id: uid() }), ...v }); },
+  formDialog(x ? 'Edit' : 'Add', LIBS[s].map((f) => (f.k === 'caliber' ? { ...f, list: caliberList() } : f)), x || (s === 'bullets' ? { diameter: 0.308 } : {}), async (v) => { await put(s, { ...(x || { id: uid() }), ...v }); },
     x ? async () => {
       if (USE[s] && S.groups.some((g) => g[USE[s]] === x.id)) { toast('In use by logged groups — cannot delete'); return false; }
       if (!confirm('Delete this item?')) return false;
@@ -570,6 +646,9 @@ function render() {
     if (!p.length) viewHome();
     else if (p[0] === 'rifle') viewRifle(p[1]);
     else if (p[0] === 'all') viewAll(p[1]);
+    else if (p[0] === 'sessions') viewSessions(p[1]);
+    else if (p[0] === 'session') viewSession(p[1]);
+    else if (p[0] === 'combo') viewCombo(p[1], decodeURIComponent(p[2] || ''));
     else if (p[0] === 'add') {
       let se = byId('sessions', p[1]); // #/add/<sessionId>; a rifle id means "latest session"
       if (!se && byId('rifles', p[1])) se = latestSession(p[1]);
