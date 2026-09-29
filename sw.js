@@ -1,6 +1,6 @@
 'use strict';
 // Bump CACHE whenever any shell file changes so installed copies update.
-const CACHE = 'loaddev-v1';
+const CACHE = 'loaddev-v2';
 const SHELL = [
   './',
   './index.html',
@@ -13,7 +13,13 @@ const SHELL = [
 ];
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
+  // No skipWaiting here: the new version waits until the user taps "Reload & update" (see message handler below),
+  // so an update never swaps the app out from under someone mid-entry.
+  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)));
+});
+
+self.addEventListener('message', (e) => {
+  if (e.data && e.data.type === 'SKIP_WAITING') self.skipWaiting();
 });
 
 self.addEventListener('activate', (e) => {

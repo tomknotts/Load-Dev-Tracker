@@ -16,20 +16,59 @@ const today = () => { const d = new Date(); return `${d.getFullYear()}-${String(
 const toast = (m) => { const t = $('#toast'); t.textContent = m; t.classList.add('on'); clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove('on'), 2600); };
 
 /* ---------- IndexedDB (all data stays on this device) ---------- */
-const STORES = ['rifles', 'bullets', 'powders', 'primers', 'cases', 'groups', 'hist'];
+const STORES = ['rifles', 'bullets', 'powders', 'primers', 'cases', 'sessions', 'groups', 'hist']; // exported / imported
+const ALL_STORES = [...STORES, 'meta']; // meta = per-device settings (backup reminder), never exported
 let db;
 const S = {};
 const rp = (r) => new Promise((res, rej) => { r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
 const store = (s, m) => db.transaction(s, m).objectStore(s);
 function openDB() {
   return new Promise((res, rej) => {
-    const r = indexedDB.open('loadtracker', 1);
-    r.onupgradeneeded = () => { for (const s of STORES) r.result.createObjectStore(s, { keyPath: 'id' }); };
+    const r = indexedDB.open('loadtracker', 2);
+    r.onupgradeneeded = () => { for (const s of ALL_STORES) if (!r.result.objectStoreNames.contains(s)) r.result.createObjectStore(s, { keyPath: 'id' }); };
     r.onsuccess = () => res(r.result);
     r.onerror = () => rej(r.error);
   });
 }
-async function loadAll() { for (const s of STORES) S[s] = await rp(store(s, 'readonly').getAll()); }
+async function loadAll() {
+  for (const s of ALL_STORES) S[s] = await rp(store(s, 'readonly').getAll());
+  S.cfg = S.meta.find((m) => m.id === 'cfg') || { id: 'cfg', lastBackup: null, days: 7, groups: 10, snooze: 0, libMig: 0 };
+}
+const saveCfg = () => rp(store('meta', 'readwrite').put(S.cfg));
+
+/* One-time / idempotent upgrades: older data (v1) had no Session entity. */
+async function migrate() {
+  const orphans = S.groups.filter((g) => !g.sessionId);
+  if (orphans.length) {
+    // one session per rifle + distinct date, using the fouling count the old logic was inferring (first group that had one)
+    const buckets = new Map();
+    for (const g of orphans.slice().sort((a, b) => a.ts - b.ts)) {
+      const k = g.rifleId + '|' + g.date;
+      if (!buckets.has(k)) buckets.set(k, []);
+      buckets.get(k).push(g);
+    }
+    for (const arr of buckets.values()) {
+      const f = arr.find((g) => fin(g.fouling)), w = arr.find((g) => g.wind), t = arr.find((g) => fin(g.temp));
+      const s = { id: uid(), rifleId: arr[0].rifleId, date: arr[0].date, wind: w ? w.wind : '', temp: t ? t.temp : null, fouling: f ? f.fouling : 0, ts: arr[0].ts };
+      await put('sessions', s);
+      for (const g of arr) {
+        const ng = { ...g, sessionId: s.id };
+        const extra = [];
+        if (g.wind && g.wind !== s.wind) extra.push('wind: ' + g.wind);
+        if (fin(g.temp) && g.temp !== s.temp) extra.push('temp: ' + g.temp + ' F');
+        if (extra.length) ng.notes = (g.notes ? g.notes + ' ' : '') + '[' + extra.join(', ') + ']';
+        delete ng.date; delete ng.wind; delete ng.temp; delete ng.fouling;
+        await put('groups', ng);
+      }
+    }
+  }
+  if (!(S.cfg.libMig >= 2)) {
+    for (const b of S.bullets) if (!b.style && /a-?max|sierra|matchking/i.test(b.name)) await put('bullets', { ...b, style: 'BTHP' });
+    for (const p of S.primers) if (!p.type && /federal/i.test(p.name) && /215/.test(p.name)) await put('primers', { ...p, type: 'Large Rifle Magnum' });
+    S.cfg.libMig = 2;
+    await saveCfg();
+  }
+}
 async function put(s, o) {
   await rp(store(s, 'readwrite').put(o));
   const i = S[s].findIndex((x) => x.id === o.id);
@@ -41,12 +80,15 @@ const byId = (s, id) => S[s].find((x) => x.id === id);
 async function exportData() {
   const data = {};
   for (const s of STORES) data[s] = S[s];
-  const blob = new Blob([JSON.stringify({ app: '308-load-dev-tracker', version: 1, exported: new Date().toISOString(), data }, null, 2)], { type: 'application/json' });
+  const blob = new Blob([JSON.stringify({ app: '308-load-dev-tracker', version: 2, exported: new Date().toISOString(), data }, null, 2)], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = `load-dev-backup-${today()}.json`;
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  S.cfg.lastBackup = Date.now(); S.cfg.snooze = 0;
+  await saveCfg();
+  renderBanners();
   toast('Backup downloaded');
 }
 async function importData(file) {
@@ -62,6 +104,9 @@ async function importData(file) {
   }
   await new Promise((res, rej) => { t.oncomplete = res; t.onerror = () => rej(t.error); });
   await loadAll();
+  await migrate(); // accepts v1 backups (no sessions) too
+  S.cfg.lastBackup = Date.now();
+  await saveCfg();
   toast('Import complete');
   render();
 }
@@ -116,25 +161,28 @@ function combos(groups) {
     };
   }).sort((a, b) => (a.mr ?? 9e9) - (b.mr ?? 9e9));
 }
-function sessionOrder(rid, date) {
-  return S.groups.filter((g) => g.rifleId === rid && g.date === date).sort((a, b) => a.ts - b.ts);
+/* Sessions are explicit: several can share a date (barrel cleaned in between). Groups keep their logged order (ts). */
+const sessOf = (g) => byId('sessions', g.sessionId);
+const gdate = (g) => (sessOf(g) || {}).date || '—';
+const groupsOf = (sid) => S.groups.filter((g) => g.sessionId === sid).sort((a, b) => a.ts - b.ts);
+const sessionsOf = (rid) => S.sessions.filter((s) => s.rifleId === rid).sort((a, b) => a.ts - b.ts);
+const latestSession = (rid) => sessionsOf(rid).sort((a, b) => b.date.localeCompare(a.date) || b.ts - a.ts)[0] || null;
+function sessionLabel(s) {
+  const same = sessionsOf(s.rifleId).filter((x) => x.date === s.date);
+  return s.date + (same.length > 1 ? ` (session ${same.findIndex((x) => x.id === s.id) + 1})` : '');
 }
-function sessionFouling(rid, date, excludeId) {
-  const gs = sessionOrder(rid, date).filter((g) => g.id !== excludeId);
-  const f = gs.find((g) => fin(g.fouling));
-  return f ? f.fouling : null;
-}
+// Rounds since clean = session fouling + every shot in earlier groups of the SAME session (Include flag does not matter: those rounds were fired).
 function roundsSinceClean(g) {
-  const gs = sessionOrder(g.rifleId, g.date);
-  let acc = sessionFouling(g.rifleId, g.date) ?? 0;
-  for (const x of gs) { if (x.id === g.id) return acc; acc += x.shots.length; }
+  const s = sessOf(g);
+  if (!s) return null;
+  let acc = fin(s.fouling) ? s.fouling : 0;
+  for (const x of groupsOf(s.id)) { if (x.id === g.id) return acc; acc += x.shots.length; }
   return null;
 }
 function rifleTotals(rid) {
   const gs = S.groups.filter((g) => g.rifleId === rid);
   const shots = gs.reduce((a, g) => a + g.shots.length, 0);
-  const dates = [...new Set(gs.map((g) => g.date))];
-  const fouling = dates.reduce((a, d) => a + (sessionFouling(rid, d) ?? 0), 0);
+  const fouling = sessionsOf(rid).reduce((a, s) => a + (fin(s.fouling) ? s.fouling : 0), 0);
   const r = byId('rifles', rid);
   const start = r && fin(r.startRounds) ? r.startRounds : 0;
   return { shots, fouling, start, barrel: start + shots + fouling };
@@ -158,14 +206,14 @@ function formDialog(title, fields, vals, onSave, onDelete) {
     ${fields.map((f) => `<div class="f"><label class="lbl" for="d-${f.k}">${esc(f.label)}</label>${
       f.type === 'select'
         ? `<select class="in" id="d-${f.k}">${f.opts.map((o) => `<option value="${esc(o[0])}"${o[0] === vals[f.k] ? ' selected' : ''}>${esc(o[1])}</option>`).join('')}</select>`
-        : `<input class="in ${f.type === 'num' ? 'm' : ''}" id="d-${f.k}" type="text" ${f.type === 'num' ? 'inputmode="decimal"' : ''} value="${esc(vals[f.k] ?? '')}" autocomplete="off">`}</div>`).join('')}
+        : `<input class="in ${f.type === 'num' ? 'm' : ''}" id="d-${f.k}" type="text" ${f.type === 'num' ? 'inputmode="decimal"' : ''} ${f.list ? `list="dl-${f.k}"` : ''} value="${esc(vals[f.k] ?? '')}" autocomplete="off">${f.list ? `<datalist id="dl-${f.k}">${f.list.map((o) => `<option value="${esc(o)}">`).join('')}</datalist>` : ''}`}</div>`).join('')}
     <div class="grid2"><button class="btn pri" value="ok">Save</button><button class="btn" value="cancel" type="button" id="d-x">Cancel</button></div>
     ${onDelete ? '<button class="btn danger sm" type="button" id="d-del">Delete</button>' : ''}</form>`;
   document.body.appendChild(d);
   const close = () => { d.close(); d.remove(); };
   $('#d-x', d).onclick = close;
   d.addEventListener('cancel', () => setTimeout(() => d.remove(), 0));
-  if (onDelete) $('#d-del', d).onclick = async () => { if (await onDelete()) close(); };
+  if (onDelete) $('#d-del', d).onclick = async () => { if (await onDelete()) { close(); render(); } };
   $('form', d).onsubmit = async (e) => {
     e.preventDefault();
     const out = {};
@@ -174,7 +222,7 @@ function formDialog(title, fields, vals, onSave, onDelete) {
       out[f.k] = f.type === 'num' ? num(raw) : raw;
       if (f.req && (out[f.k] === null || out[f.k] === '')) { toast(`${f.label} is required`); return; }
     }
-    await onSave(out);
+    try { await onSave(out); } catch (err) { return; } // onSave already told the user why
     close();
     render();
   };
@@ -205,6 +253,7 @@ function rifleForm(r) {
   }, r ? async () => {
     if (!confirm(`Delete "${r.name}" and ALL its groups? This cannot be undone.`)) return false;
     for (const g of S.groups.filter((g2) => g2.rifleId === r.id)) await del('groups', g.id);
+    for (const s of sessionsOf(r.id)) await del('sessions', s.id);
     for (const h of S.hist.filter((h2) => h2.rifleId === r.id)) await del('hist', h.id);
     await del('rifles', r.id);
     location.hash = '#/';
@@ -230,6 +279,7 @@ function viewRifle(rid) {
   const cs = combos(gs);
   const best = cs.find((c) => c.nGroups >= 2 && c.mr !== null);
   const t = rifleTotals(rid);
+  const latest = latestSession(rid);
   main(`<div class="muted">${esc(r.caliber || '')}${r.barrel ? ' · ' + r.barrel + ' in barrel' : ''}</div>
     <div class="hero"><div class="lbl">Current best load</div>
     ${best ? `<div style="font-size:19px;font-weight:600">${esc(bl(best.bulletId))} · ${esc(nm('powders', best.powderId))}</div>
@@ -238,7 +288,9 @@ function viewRifle(rid) {
       : `<div style="font-size:19px;font-weight:600">Not enough data yet</div><div>Needs 2+ groups at the exact same Bullet + Powder + Charge + Primer + Jump.</div>`}</div>
     <div class="grid2"><div class="card"><div class="lbl">Shots logged</div><div class="mono v" style="font-size:30px">${t.shots}</div></div>
     <div class="card"><div class="lbl">Barrel total</div><div class="mono v" style="font-size:30px">${t.barrel}</div><div class="muted">${t.start} start + ${t.shots} logged + ${t.fouling} fouling</div></div></div>
-    <a class="btn dark" href="#/add/${rid}">+ Add New Group</a>
+    ${latest ? `<div class="card"><div class="lbl">Current session</div><div class="row sb"><b>${esc(sessionLabel(latest))}</b><span class="mono">${fin(latest.fouling) ? latest.fouling : 0} fouling · ${groupsOf(latest.id).length} grp</span></div></div>` : ''}
+    ${latest ? `<a class="btn dark" href="#/add/${rid}">+ Add New Group</a>` : ''}
+    <button class="btn ${latest ? '' : 'dark'}" data-act="new-session" data-id="${rid}">+ Start New Session</button>
     <a class="btn" href="#/all/${rid}">View All Data</a>
     ${cs.length ? `<h2>Combos · pooled (Include = Y only)</h2>${cs.map((c) => comboRow(c, c === best)).join('')}` : ''}`);
 }
@@ -254,12 +306,20 @@ function viewAll(rid) {
   const used = (k, s) => S[s].filter((x) => all.some((g) => g[k] === x.id));
   const dist = (k) => [...new Set(all.map((g) => String(Number(g[k]))))].sort((a, b) => a - b);
   const sel = (key, label, inner) => `<div class="f"><label class="lbl" for="F-${key}">${label}</label><select class="in" style="min-height:48px;font-size:16px" id="F-${key}" data-filter="${key}">${inner}</select></div>`;
-  const list = gs.slice().sort((a, b) => b.date.localeCompare(a.date) || b.ts - a.ts).map((g) => {
+  const filtering = !!(F.powder || F.bullet || F.primer || F.charge || F.jump);
+  const groupCard = (g) => {
     const s = gstats(g);
     return `<a class="card ${g.include === false ? 'excl' : ''}" href="#/group/${g.id}">
-      <div class="row sb"><b>${esc(g.date)} · ${esc(nm('powders', g.powderId))} ${g.charge} gn</b>${g.include === false ? '<span class="tag a">Excluded</span>' : g.reference ? '<span class="tag g">Ref</span>' : ''}</div>
+      <div class="row sb"><b>${esc(nm('powders', g.powderId))} ${g.charge} gn</b>${g.include === false ? '<span class="tag a">Excluded</span>' : g.reference ? '<span class="tag g">Ref</span>' : ''}</div>
       <div class="muted">${esc(bl(g.bulletId))} · ${esc(nm('primers', g.primerId))} · ${g.jump} thou · RSC ${roundsSinceClean(g) ?? '—'}</div>
       <div class="grid3"><div><div class="lbl">MR</div><span class="mono v">${fmt(s.mr)}</span></div><div><div class="lbl">ES</div><span class="mono v">${fmt(s.es)}</span></div><div><div class="lbl">Shots</div><span class="mono v">${s.total}</span></div></div></a>`;
+  };
+  const list = sessionsOf(rid).sort((a, b) => b.date.localeCompare(a.date) || b.ts - a.ts).map((se) => {
+    const mine = gs.filter((g) => g.sessionId === se.id).sort((a, b) => a.ts - b.ts);
+    if (filtering && !mine.length) return '';
+    return `<div class="row sb" style="margin-top:6px"><div><b>${esc(sessionLabel(se))}</b><div class="muted">${fin(se.fouling) ? se.fouling : 0} fouling${fin(se.temp) ? ' · ' + se.temp + ' F' : ''}${se.wind ? ' · ' + esc(se.wind) : ''}</div></div>
+      <button class="btn sm" data-act="edit-session" data-id="${se.id}">Edit session</button></div>
+      ${mine.length ? mine.map(groupCard).join('') : '<div class="card muted">No groups in this session yet.</div>'}`;
   }).join('');
   const cs = combos(gs);
   const hist = S.hist.filter((h) => h.rifleId === rid);
@@ -271,7 +331,7 @@ function viewAll(rid) {
     ${sel('primer', 'Primer', opts(used('primerId', 'primers'), F.primer, (x) => x.name, 'All'))}
     ${sel('charge', 'Charge', '<option value="">All</option>' + dist('charge').map((c) => `<option${c === F.charge ? ' selected' : ''}>${c}</option>`).join(''))}
     ${sel('jump', 'Jump', '<option value="">All</option>' + dist('jump').map((c) => `<option${c === F.jump ? ' selected' : ''}>${c}</option>`).join(''))}</div>
-    <div class="muted">${gs.length} of ${all.length} groups shown · newest first</div>
+    <div class="muted">${gs.length} of ${all.length} groups shown · by session, newest first</div>
     ${list || '<div class="card muted">No groups match.</div>'}
     ${cs.length ? `<h2>Pooled combos (filtered)</h2>${cs.map((c) => comboRow(c, false)).join('')}` : ''}
     <h2>Historical · manual ES only</h2>
@@ -315,11 +375,12 @@ function viewGroup(gid) {
   const g = byId('groups', gid);
   if (!g) return viewHome();
   const s = gstats(g);
-  bar(back('#/all/' + g.rifleId, 'All Data'), g.date, `<a class="r" href="#/edit/${gid}">Edit</a>`);
-  const sess = sessionOrder(g.rifleId, g.date);
-  main(`<div><h1 style="font-size:24px">${esc(g.date)} · Group ${sess.findIndex((x) => x.id === g.id) + 1}</h1>
+  const se = sessOf(g) || {};
+  bar(back('#/all/' + g.rifleId, 'All Data'), gdate(g), `<a class="r" href="#/edit/${gid}">Edit</a>`);
+  const sess = groupsOf(g.sessionId);
+  main(`<div><h1 style="font-size:24px">${esc(se.id ? sessionLabel(se) : '—')} · Group ${sess.findIndex((x) => x.id === g.id) + 1}</h1>
     <div class="muted">${esc(bl(g.bulletId))} · ${esc(nm('powders', g.powderId))} ${g.charge} gn · ${esc(nm('primers', g.primerId))} · ${g.jump} thou</div>
-    <div class="muted">${fin(g.temp) ? g.temp + ' F · ' : ''}${esc(g.wind || '')}</div>
+    <div class="muted">${fin(se.temp) ? se.temp + ' F · ' : ''}${esc(se.wind || '')}</div>
     <div class="row" style="margin-top:6px">${g.include === false ? '<span class="tag a">Excluded from analysis</span>' : '<span class="tag g">Included</span>'}${g.reference ? '<span class="tag g">Reference group</span>' : ''}</div></div>
     <div class="hero"><div class="grid2"><div><div class="lbl">Mean radius</div><div class="big mono">${fmt(s.mr)}"</div></div><div><div class="lbl">ES (center)</div><div class="big mono">${fmt(s.es)}"</div></div></div></div>
     ${plotSVG(g, s)}
@@ -334,13 +395,14 @@ function viewGroup(gid) {
       <div class="kv"><span>Average</span><b>${fin(s.vavg) ? s.vavg.toFixed(0) + ' fps' : '—'}</b></div>
       <div class="kv"><span>Std dev (sample)</span><b>${fmt(s.vsd, 1)}</b></div>
       <div class="kv"><span>Extreme spread</span><b>${fmt(s.ves, 0)}</b></div></div>
-    <div class="card"><div class="lbl">Session</div>
+    <div class="card"><div class="row sb"><div class="lbl">Session</div><button class="btn sm" data-act="edit-session" data-id="${g.sessionId}">Edit session</button></div>
+      <div class="kv"><span>Session fouling shots</span><b>${fin(se.fouling) ? se.fouling : 0}</b></div>
       <div class="kv"><span>Rounds since clean (at start of group)</span><b>${roundsSinceClean(g) ?? '—'}</b></div>
       <div class="kv"><span>COAL / trimmed length</span><b>${fin(g.coal) ? g.coal : '—'} / ${fin(g.trim) ? g.trim : '—'}</b></div></div>
     <div class="card"><div class="lbl">Shots</div><table><thead><tr><th>#</th><th>Vel</th><th>X</th><th>Y</th><th>Rad</th></tr></thead><tbody>
       ${g.shots.map((p, i) => `<tr><td>${i + 1}</td><td>${fin(p.v) ? p.v : '—'}</td><td>${sfmt(p.x)}</td><td>${sfmt(p.y)}</td><td>${fin(p.x) && fin(p.y) && s.cx !== null ? fmt(Math.hypot(p.x - s.cx, p.y - s.cy)) : '—'}</td></tr>`).join('')}</tbody></table></div>
     ${g.notes ? `<div class="card"><div class="lbl">Notes</div>${esc(g.notes)}</div>` : ''}
-    <a class="btn dark" href="#/add/${g.rifleId}?from=${g.id}">+ Add another group (same load)</a>
+    <a class="btn dark" href="#/add/${g.sessionId}?from=${g.id}">+ Add another group (same session &amp; load)</a>
     <button class="btn danger" data-act="del-group" data-id="${g.id}">Delete group</button>`);
 }
 
@@ -349,14 +411,16 @@ function shotRow(i, p = {}) {
   return `<tr><td class="mono" style="width:24px;padding:0"><b>${i + 1}</b></td>${c('sv', p.v, 'velocity', false)}${c('sx', p.x, 'X', true)}${c('sy', p.y, 'Y', true)}</tr>`;
 }
 
-function viewGroupForm(rid, gid, fromId) {
+function viewGroupForm(rid, gid, fromId, sid) {
   const r = byId('rifles', rid);
   if (!r) return viewHome();
   const g0 = gid ? byId('groups', gid) : null;
   const src = g0 || (fromId && byId('groups', fromId)) || S.groups.filter((g) => g.rifleId === rid).sort((a, b) => b.ts - a.ts)[0] || {};
   const missing = !S.bullets.length || !S.powders.length || !S.primers.length;
   bar(back(g0 ? '#/group/' + gid : '#/rifle/' + rid, g0 ? 'Group' : r.name), g0 ? 'Edit Group' : 'New Group');
-  const date = g0 ? g0.date : (fromId && src.date) || today();
+  const curSid = g0 ? g0.sessionId : sid;
+  const sessOpts = sessionsOf(rid).sort((a, b) => b.date.localeCompare(a.date) || b.ts - a.ts)
+    .map((x) => `<option value="${x.id}"${x.id === curSid ? ' selected' : ''}>${esc(sessionLabel(x))} · ${fin(x.fouling) ? x.fouling : 0} fouling</option>`).join('');
   const nShots = g0 ? g0.shots.length : 5;
   const sec = (t) => `<h2 style="color:var(--green);border-color:var(--green)">${t}</h2>`;
   const fld = (id, label, val, cls = 'm', extra = '') => `<div class="f"><label class="lbl" for="${id}">${label}</label><input class="in ${cls}" id="${id}" type="text" ${cls === 'm' ? 'inputmode="decimal"' : ''} value="${esc(val ?? '')}" autocomplete="off" ${extra}></div>`;
@@ -364,9 +428,8 @@ function viewGroupForm(rid, gid, fromId) {
   main(`${missing ? '<div class="card warn">Add at least one Bullet, Powder and Primer in <a href="#/settings" style="text-decoration:underline">Settings</a> first.</div>' : ''}
     <form id="gform" autocomplete="off">
     ${sec('SESSION')}
-    ${fld('f-date', 'Session date', date, '', 'inputmode="numeric"')}
-    <div class="grid2">${fld('f-temp', 'Temp (F)', g0 ? g0.temp : '')}<div id="foulbox"></div></div>
-    ${fld('f-wind', 'Wind / conditions', g0 ? g0.wind : (fromId ? src.wind : ''), '')}
+    <div class="f"><label class="lbl" for="f-session">Session</label><select class="in" id="f-session">${sessOpts}</select></div>
+    <div class="muted">Date, wind, temp and fouling shots belong to the session. Change them with Edit session on the rifle or group page.</div>
     ${sec('LOAD')}
     <div class="f"><label class="lbl" for="f-bullet">Bullet</label><select class="in" id="f-bullet">${opts(S.bullets, src.bulletId, (x) => x.name + (fin(x.weight) ? ' ' + x.weight + ' gn' : ''))}</select></div>
     <div class="f"><label class="lbl" for="f-powder">Powder</label><select class="in" id="f-powder">${opts(S.powders, src.powderId, (x) => x.name)}</select></div>
@@ -386,15 +449,7 @@ function viewGroupForm(rid, gid, fromId) {
     <div class="card" id="preview"></div>
     <button class="btn pri" type="submit" ${missing ? 'disabled' : ''}>Save group</button></form>`);
   const form = $('#gform');
-  const foul = () => {
-    const d = $('#f-date').value.trim();
-    const inh = sessionFouling(rid, d, gid);
-    $('#foulbox').innerHTML = inh !== null
-      ? `<div class="f"><span class="lbl">Fouling shots</span><div class="muted">Session already has ${inh} fouling shots — inherited.</div></div>`
-      : fld('f-foul', 'Fouling shots', g0 && fin(g0.fouling) ? g0.fouling : '');
-  };
-  foul();
-  form.addEventListener('input', (e) => { if (e.target.id === 'f-date') foul(); preview(); });
+  form.addEventListener('input', preview);
   form.addEventListener('change', preview);
   form.onsubmit = (e) => { e.preventDefault(); saveGroup(rid, gid, g0); };
   preview();
@@ -415,21 +470,19 @@ function preview() {
     <div class="muted">${s.n} shot${s.n === 1 ? '' : 's'} with X/Y · ${s.vn} with velocity${s.n === 1 ? ' · mean radius needs 2+ shots' : ''}</div>`;
 }
 async function saveGroup(rid, gid, g0) {
-  const date = $('#f-date').value.trim();
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return toast('Date must be YYYY-MM-DD');
+  const sessionId = $('#f-session').value;
+  if (!byId('sessions', sessionId)) return toast('Pick a session');
   const charge = num($('#f-charge').value), jump = num($('#f-jump').value);
   if (charge === null) return toast('Charge weight is required');
   if (jump === null) return toast('Jump / seating depth is required');
   const shots = readShots();
   if (!shots.length) return toast('Enter at least one shot');
-  const foulEl = $('#f-foul');
-  const inherited = sessionFouling(rid, date, gid) !== null;
   const g = {
-    id: gid || uid(), rifleId: rid, ts: g0 ? g0.ts : Date.now(), date,
+    id: gid || uid(), rifleId: rid, sessionId,
+    // moving a group to another session puts it last there; otherwise it keeps its place in the order
+    ts: g0 && g0.sessionId === sessionId ? g0.ts : Date.now(),
     bulletId: $('#f-bullet').value, powderId: $('#f-powder').value, primerId: $('#f-primer').value,
     charge, jump, coal: num($('#f-coal').value), trim: num($('#f-trim').value),
-    wind: $('#f-wind').value.trim(), temp: num($('#f-temp').value),
-    fouling: inherited ? null : (foulEl ? num(foulEl.value) ?? 0 : 0),
     include: $('input[name=inc]:checked').value === '1', reference: $('input[name=ref]:checked').value === '1',
     notes: $('#f-notes').value.trim(), esManual: num($('#f-esm').value), shots
   };
@@ -441,11 +494,28 @@ async function deleteGroup(id) {
   const g = byId('groups', id);
   if (!g || !confirm('Delete this group? This cannot be undone.')) return;
   await del('groups', id);
-  if (fin(g.fouling)) { // hand the session's fouling count to the next-earliest remaining group
-    const nxt = sessionOrder(g.rifleId, g.date)[0];
-    if (nxt) await put('groups', { ...nxt, fouling: g.fouling });
-  }
   location.hash = '#/rifle/' + g.rifleId;
+}
+
+/* ---------- sessions ---------- */
+function sessionForm(rid, se) {
+  formDialog(se ? 'Edit session' : 'New session', [
+    { k: 'date', label: 'Date (YYYY-MM-DD)', req: true },
+    { k: 'fouling', label: 'Fouling shots this session', type: 'num' },
+    { k: 'temp', label: 'Temp (F)', type: 'num' },
+    { k: 'wind', label: 'Wind / conditions' }
+  ], se ? { ...se } : { date: today(), fouling: 0 }, async (v) => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(v.date)) { toast('Date must be YYYY-MM-DD'); throw new Error('bad date'); }
+    const s = { ...(se || { id: uid(), rifleId: rid, ts: Date.now() }), date: v.date, fouling: v.fouling ?? 0, temp: v.temp, wind: v.wind };
+    await put('sessions', s);
+    if (!se) location.hash = '#/add/' + s.id; // straight into the first group
+  }, se ? async () => {
+    const n = groupsOf(se.id).length;
+    if (!confirm(`Delete this session${n ? ` and its ${n} group${n === 1 ? '' : 's'}` : ''}? This cannot be undone.`)) return false;
+    for (const g of groupsOf(se.id)) await del('groups', g.id);
+    await del('sessions', se.id);
+    return true;
+  } : null);
 }
 
 function viewSettings() {
@@ -454,13 +524,18 @@ function viewSettings() {
     ${S[s].slice().sort((a, b) => a.name.localeCompare(b.name)).map((x) => `<div class="item" role="button" tabindex="0" data-act="lib-edit" data-s="${s}" data-id="${x.id}"><div>${esc(x.name)}${sub(x) ? `<small>${esc(sub(x))}</small>` : ''}</div><span class="muted">Edit</span></div>`).join('') || '<div class="muted">None yet.</div>'}`;
   main(`<h1>Components</h1>
     ${lib('RIFLES', 'rifles', (x) => `${x.caliber || ''}${x.barrel ? ' · ' + x.barrel + ' in' : ''} · start ${x.startRounds || 0} rds`).replace('data-act="lib-new" data-s="rifles"', 'data-act="new-rifle"')}
-    ${lib('BULLETS', 'bullets', (x) => `${fin(x.weight) ? x.weight + ' gn' : ''}${fin(x.diameter) ? ' · dia ' + x.diameter + ' in' : ''}`)}
+    ${lib('BULLETS', 'bullets', (x) => [x.style, fin(x.weight) ? x.weight + ' gn' : '', fin(x.diameter) ? 'dia ' + x.diameter + ' in' : ''].filter(Boolean).join(' · '))}
     ${lib('POWDERS', 'powders', () => '')}
-    ${lib('PRIMERS', 'primers', () => '')}
+    ${lib('PRIMERS', 'primers', (x) => x.type || '')}
     ${lib('CASES · optional', 'cases', () => '')}
     <h2>BACKUP</h2>
     <div class="muted">Data lives only on this device. Export a JSON file to back up or move it to another device.</div>
     <div class="grid2"><button class="btn dark" data-act="export">Export data</button><button class="btn" data-act="import">Import data</button></div>
+    <div class="muted">${S.cfg.lastBackup ? 'Last backup: ' + new Date(S.cfg.lastBackup).toLocaleString() : 'No backup made yet.'}</div>
+    <div class="lbl" style="margin-top:6px">Remind me after</div>
+    <div class="grid2"><div class="f"><label class="lbl" for="bk-days">Days</label><input class="in m" id="bk-days" inputmode="numeric" value="${S.cfg.days}"></div>
+    <div class="f"><label class="lbl" for="bk-groups">New groups</label><input class="in m" id="bk-groups" inputmode="numeric" value="${S.cfg.groups}"></div></div>
+    <div class="muted">Whichever comes first. Set either to 0 to turn that trigger off.</div>
     <input type="file" id="imp" accept="application/json,.json" hidden>
     <div class="muted" id="persist"></div>`);
   $('#imp').onchange = (e) => { if (e.target.files[0]) importData(e.target.files[0]); e.target.value = ''; };
@@ -468,9 +543,12 @@ function viewSettings() {
 }
 
 const LIBS = {
-  bullets: [{ k: 'name', label: 'Manufacturer / name', req: true }, { k: 'weight', label: 'Weight (gn)', type: 'num' }, { k: 'diameter', label: 'Diameter (in)', type: 'num', req: true }],
+  bullets: [{ k: 'name', label: 'Manufacturer / name', req: true },
+    { k: 'style', label: 'Style (bullet shape)', list: ['BTHP', 'BT', 'SP', 'SPBT', 'FMJ', 'FMJBT', 'HP', 'RN', 'SWC', 'Hybrid'] },
+    { k: 'weight', label: 'Weight (gn)', type: 'num' }, { k: 'diameter', label: 'Diameter (in)', type: 'num', req: true }],
   powders: [{ k: 'name', label: 'Name', req: true }],
-  primers: [{ k: 'name', label: 'Name', req: true }],
+  primers: [{ k: 'name', label: 'Brand / name', req: true },
+    { k: 'type', label: 'Type', list: ['Large Rifle', 'Large Rifle Magnum', 'Small Rifle', 'Small Rifle Magnum', 'Large Pistol', 'Large Pistol Magnum', 'Small Pistol', 'Small Pistol Magnum'] }],
   cases: [{ k: 'name', label: 'Manufacturer / name', req: true }]
 };
 const USE = { bullets: 'bulletId', powders: 'powderId', primers: 'primerId' };
@@ -492,12 +570,52 @@ function render() {
     if (!p.length) viewHome();
     else if (p[0] === 'rifle') viewRifle(p[1]);
     else if (p[0] === 'all') viewAll(p[1]);
-    else if (p[0] === 'add') viewGroupForm(p[1], null, q.get('from'));
+    else if (p[0] === 'add') {
+      let se = byId('sessions', p[1]); // #/add/<sessionId>; a rifle id means "latest session"
+      if (!se && byId('rifles', p[1])) se = latestSession(p[1]);
+      if (se) viewGroupForm(se.rifleId, null, q.get('from'), se.id);
+      else if (byId('rifles', p[1])) { location.replace('#/rifle/' + p[1]); toast('Start a session first'); }
+      else viewHome();
+    }
     else if (p[0] === 'edit') { const g = byId('groups', p[1]); g ? viewGroupForm(g.rifleId, g.id) : viewHome(); }
     else if (p[0] === 'group') viewGroup(p[1]);
     else if (p[0] === 'settings') viewSettings();
     else viewHome();
   } catch (e) { console.error(e); main(`<div class="card"><b>Something went wrong showing this page.</b><div class="muted">${esc(e.message)}</div></div><a class="btn" href="#/">Home</a>`); }
+  renderBanners();
+}
+
+/* ---------- banners: app update + backup reminder ---------- */
+let updateWorker = null; // a new service worker that is installed and waiting
+function backupDue() {
+  const c = S.cfg;
+  if (!S.groups.length || Date.now() < (c.snooze || 0)) return null;
+  if (!c.lastBackup) return 'You have data on this device but have never backed it up.';
+  const days = (Date.now() - c.lastBackup) / 864e5;
+  const fresh = S.groups.filter((g) => g.ts > c.lastBackup).length;
+  if (c.days > 0 && days >= c.days) return `Last backup was ${Math.floor(days)} days ago.`;
+  if (c.groups > 0 && fresh >= c.groups) return `${fresh} groups logged since your last backup.`;
+  return null;
+}
+function renderBanners() {
+  const box = $('#banners');
+  if (!box) return;
+  const onForm = /^#\/(add|edit)\//.test(location.hash); // never nag mid-entry
+  const due = onForm ? null : backupDue();
+  box.innerHTML = (updateWorker ? `<div class="banner"><span>Update available</span><button class="btn sm dark" data-act="apply-update">Reload &amp; update</button></div>` : '')
+    + (due ? `<div class="banner warnb"><span>${esc(due)} Back up now.</span><button class="btn sm dark" data-act="export">Backup Now</button><button class="btn sm" data-act="snooze">Later</button></div>` : '');
+}
+function initUpdates() {
+  if (!('serviceWorker' in navigator)) return;
+  navigator.serviceWorker.register('sw.js').then((reg) => {
+    const track = (w) => w.addEventListener('statechange', () => { if (w.state === 'installed' && navigator.serviceWorker.controller) { updateWorker = w; renderBanners(); } });
+    if (reg.waiting && navigator.serviceWorker.controller) { updateWorker = reg.waiting; renderBanners(); }
+    reg.addEventListener('updatefound', () => reg.installing && track(reg.installing));
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') reg.update().catch(() => {}); });
+    reg.update().catch(() => {});
+  }).catch(() => {});
+  let reloading = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => { if (!reloading && updateWorker) { reloading = true; location.reload(); } });
 }
 window.addEventListener('hashchange', render);
 
@@ -512,6 +630,10 @@ document.addEventListener('click', (e) => {
   else if (a === 'new-hist') histForm(id, null);
   else if (a === 'edit-hist') histForm(byId('hist', id).rifleId, byId('hist', id));
   else if (a === 'del-group') deleteGroup(id);
+  else if (a === 'new-session') sessionForm(id, null);
+  else if (a === 'edit-session') { const se = byId('sessions', id); if (se) sessionForm(se.rifleId, se); }
+  else if (a === 'apply-update') { if (updateWorker) updateWorker.postMessage({ type: 'SKIP_WAITING' }); }
+  else if (a === 'snooze') { S.cfg.snooze = Date.now() + 864e5; saveCfg(); renderBanners(); }
   else if (a === 'export') exportData();
   else if (a === 'import') $('#imp').click();
   else if (a === 'add-shot') { const tb = $('#shots'); tb.insertAdjacentHTML('beforeend', shotRow(tb.rows.length)); $$('#shots tr:last-child .sv')[0].focus(); }
@@ -527,6 +649,12 @@ document.addEventListener('keydown', (e) => { if ((e.key === 'Enter' || e.key ==
 document.addEventListener('change', (e) => {
   const k = e.target.dataset && e.target.dataset.filter;
   if (k) { F[k] = e.target.value; viewAllKeepScroll(); }
+  if (e.target.id === 'bk-days' || e.target.id === 'bk-groups') {
+    const n = num(e.target.value);
+    S.cfg[e.target.id === 'bk-days' ? 'days' : 'groups'] = n !== null && n >= 0 ? Math.round(n) : (e.target.id === 'bk-days' ? 7 : 10);
+    e.target.value = S.cfg[e.target.id === 'bk-days' ? 'days' : 'groups'];
+    saveCfg(); renderBanners();
+  }
 });
 function viewAllKeepScroll() { const y = window.scrollY; render(); window.scrollTo(0, y); }
 
@@ -534,10 +662,12 @@ function viewAllKeepScroll() { const y = window.scrollY; render(); window.scroll
   try {
     db = await openDB();
     await loadAll();
+    await migrate();
     if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
   } catch (e) {
     main(`<div class="card"><b>Storage unavailable.</b><div class="muted">${esc(e.message)}. This app needs IndexedDB (not private-browsing mode).</div></div>`);
     return;
   }
   render();
+  initUpdates();
 })();
