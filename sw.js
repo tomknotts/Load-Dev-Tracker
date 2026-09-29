@@ -1,6 +1,6 @@
 'use strict';
 // Bump CACHE whenever any shell file changes so installed copies update.
-const CACHE = 'loaddev-v5';
+const CACHE = 'loaddev-v6';
 const SHELL = [
   './',
   './index.html',

@@ -15,6 +15,19 @@ const sfmt = (n, d = 2) => (fin(n) ? (n < 0 ? '−' : '+') + Math.abs(n).toFixed
 const today = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
 const toast = (m) => { const t = $('#toast'); t.textContent = m; t.classList.add('on'); clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove('on'), 2600); };
 
+/* ---------- theme: light / dark / auto (follows the phone). Per-device, kept in localStorage so it applies before first paint ---------- */
+const themePref = () => { try { return localStorage.getItem('theme') || 'auto'; } catch (e) { return 'auto'; } };
+const accentPref = () => { try { const a = localStorage.getItem('accent'); return a === 'blue' || a === 'orange' ? a : 'green'; } catch (e) { return 'green'; } };
+function applyTheme(p = themePref(), a = accentPref()) {
+  const root = document.documentElement;
+  if (p === 'light' || p === 'dark') root.setAttribute('data-theme', p); else root.removeAttribute('data-theme');
+  if (a === 'blue' || a === 'orange') root.setAttribute('data-accent', a); else root.removeAttribute('data-accent');
+  const m = document.querySelector('meta[name=theme-color]'); // browser / status bar color follows the accent
+  if (m) m.setAttribute('content', getComputedStyle(root).getPropertyValue('--accent').trim() || '#3f5b2e');
+}
+applyTheme();
+if (matchMedia) matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => applyTheme());
+
 /* ---------- IndexedDB (all data stays on this device) ---------- */
 const STORES = ['rifles', 'calibers', 'bullets', 'powders', 'primers', 'cases', 'sessions', 'groups', 'hist']; // exported / imported
 const ALL_STORES = [...STORES, 'meta']; // meta = per-device settings (backup reminder), never exported
@@ -226,7 +239,7 @@ const comboLabel = (c) => `${bl(c.bulletId)} · ${nm('powders', c.powderId)} ${c
 // With rid, the middle of the bar shows the rifle name (tap = that rifle's main page) and the page name underneath.
 const bar = (left, title, right = '', rid = null) => {
   const r = rid && byId('rifles', rid);
-  const mid = r ? `<a class="t" href="#/rifle/${rid}">${esc(r.name)}<small>${esc(title)}</small></a>` : `<div class="t">${esc(title)}</div>`;
+  const mid = r ? `<a class="t" href="#/rifle/${rid}"><span class="n">${esc(r.name)}</span><small>${esc(title)}</small></a>` : `<div class="t">${esc(title)}</div>`;
   $('#bar').innerHTML = `${left || '<span style="min-width:64px"></span>'}${mid}${right || '<span style="min-width:64px"></span>'}`;
 };
 const main = (h) => { $('#main').innerHTML = h; window.scrollTo(0, 0); };
@@ -305,7 +318,7 @@ function groupCard(g, showSess) {
 }
 function comboRow(c, best, rank) {
   const ranked = c.nGroups >= 2;
-  return `<a class="card" href="${comboHref(c)}" ${best ? 'style="border:2px solid var(--green)"' : ''}>
+  return `<a class="card" href="${comboHref(c)}" ${best ? 'style="border:2px solid var(--accent-text)"' : ''}>
     <div class="row sb"><b>${esc(comboLabel(c))}</b>${rank ? `<span class="tag ${rank === 1 ? 'g' : ''}">${rank === 1 ? '#1 best' : '#' + rank}</span>` : ''}</div>
     <div class="grid4"><div><div class="lbl">Grp</div><span class="mono v">${c.nGroups}</span></div><div><div class="lbl">Shots</div><span class="mono v">${c.nShots}</span></div>
     <div><div class="lbl">MR</div><span class="mono v">${fmt(c.mr)}</span></div><div><div class="lbl">Vel</div><span class="mono v">${fin(c.vel) ? Math.round(c.vel) : '—'}</span></div></div>
@@ -485,11 +498,11 @@ function plotSVG(g, s) {
   const rings = [];
   for (let r = 0.25; r <= E + 1e-6; r += 0.25) rings.push(r);
   return `<svg class="plot" viewBox="${-E} ${-E} ${2 * E} ${2 * E}" role="img" aria-label="Shot plot, inches from point of aim">
-    ${rings.map((r) => `<circle cx="0" cy="0" r="${r}" fill="none" stroke="#d5d2c6" stroke-width="${E / 200}"/>`).join('')}
-    <line x1="${-E}" y1="0" x2="${E}" y2="0" stroke="#b9b6a8" stroke-width="${E / 200}"/><line x1="0" y1="${-E}" x2="0" y2="${E}" stroke="#b9b6a8" stroke-width="${E / 200}"/>
-    ${pts.map((p, i) => `<circle cx="${p.x}" cy="${-p.y}" r="${rad}" fill="rgba(63,91,46,.45)" stroke="#3f5b2e" stroke-width="${E / 250}"/><text x="${p.x}" y="${-p.y + E / 60}" font-size="${E / 22}" text-anchor="middle" fill="#1b1f1a">${g.shots.indexOf(p) + 1}</text>`).join('')}
-    ${s.cx !== null ? `<path d="M${s.cx - E / 25} ${-s.cy}H${s.cx + E / 25}M${s.cx} ${-s.cy - E / 25}V${-s.cy + E / 25}" stroke="#a12b1f" stroke-width="${E / 90}"/>` : ''}
-    <circle cx="0" cy="0" r="${E / 60}" fill="#1b1f1a"/></svg>
+    ${rings.map((r) => `<circle cx="0" cy="0" r="${r}" fill="none" style="stroke:var(--line)" stroke-width="${E / 200}"/>`).join('')}
+    <line x1="${-E}" y1="0" x2="${E}" y2="0" style="stroke:var(--line2)" stroke-width="${E / 200}"/><line x1="0" y1="${-E}" x2="0" y2="${E}" style="stroke:var(--line2)" stroke-width="${E / 200}"/>
+    ${pts.map((p, i) => `<circle cx="${p.x}" cy="${-p.y}" r="${rad}" style="fill:var(--accent);fill-opacity:.45;stroke:var(--accent-text)" stroke-width="${E / 250}"/><text x="${p.x}" y="${-p.y + E / 60}" font-size="${E / 22}" text-anchor="middle" style="fill:var(--ink)">${g.shots.indexOf(p) + 1}</text>`).join('')}
+    ${s.cx !== null ? `<path d="M${s.cx - E / 25} ${-s.cy}H${s.cx + E / 25}M${s.cx} ${-s.cy - E / 25}V${-s.cy + E / 25}" style="stroke:var(--red)" stroke-width="${E / 90}"/>` : ''}
+    <circle cx="0" cy="0" r="${E / 60}" style="fill:var(--ink)"/></svg>
     <div class="muted">Plot: rings every 0.25" from point of aim · red cross = group center · circles drawn at bullet diameter.</div>`;
 }
 
@@ -549,7 +562,7 @@ function viewGroupForm(rid, gid, fromId, sid) {
   const bLabel = (x) => x.name + (fin(x.weight) ? ' ' + x.weight + ' gn' : '');
   const filtered = bulletsFor(rid, src.bulletId);
   const nShots = g0 ? g0.shots.length : 5;
-  const sec = (t) => `<h2 style="color:var(--green);border-color:var(--green)">${t}</h2>`;
+  const sec = (t) => `<h2 style="color:var(--accent-text);border-color:var(--accent-text)">${t}</h2>`;
   const fld = (id, label, val, cls = 'm', extra = '') => `<div class="f"><label class="lbl" for="${id}">${label}</label><input class="in ${cls}" id="${id}" type="text" ${cls === 'm' ? 'inputmode="decimal"' : ''} value="${esc(val ?? '')}" autocomplete="off" ${extra}></div>`;
   const yn = (name, on) => `<div class="seg"><label><input type="radio" name="${name}" value="1"${on ? ' checked' : ''}><span>Y</span></label><label><input type="radio" name="${name}" value="0"${on ? '' : ' checked'}><span>N</span></label></div>`;
   main(`${missing ? '<div class="card warn">Add at least one Bullet, Powder and Primer in <a href="#/settings" style="text-decoration:underline">Settings</a> first.</div>' : ''}
@@ -670,6 +683,11 @@ function viewSettings() {
     ${lib('POWDERS', 'powders', () => '')}
     ${lib('PRIMERS', 'primers', (x) => x.type || '')}
     ${lib('CASES · optional', 'cases', () => '')}
+    <h2>APPEARANCE</h2>
+    <div class="grid3">${[['light', 'Light'], ['dark', 'Dark'], ['auto', 'Auto']].map(([v, l]) => `<button class="btn ${themePref() === v ? 'pri' : ''}" data-act="theme" data-v="${v}" aria-pressed="${themePref() === v}">${l}</button>`).join('')}</div>
+    <div class="lbl">Accent color</div>
+    <div class="grid3">${[['green', 'Green', '#3f5b2e'], ['blue', 'Blue', '#0b4f9c'], ['orange', 'Orange', '#c2560c']].map(([v, l, c]) => `<button class="btn ${accentPref() === v ? 'pri' : ''}" data-act="accent" data-v="${v}" aria-pressed="${accentPref() === v}"><span class="swatch" style="background:${c}"></span>${l}</button>`).join('')}</div>
+    <div class="muted">Auto follows your phone's light or dark setting. Theme and accent are saved on this device only.</div>
     <h2>PREFERENCES</h2>
     <div class="f"><label class="lbl" for="pref-dist">Main-screen best load distance (yards)</label><input class="in m" id="pref-dist" inputmode="numeric" value="${bestDist()}"></div>
     <div class="muted">The rifle page shows the best load at this distance. Every distance is on the Best Loads page.</div>
@@ -782,6 +800,8 @@ document.addEventListener('click', (e) => {
   else if (a === 'new-hist') histForm(id, null);
   else if (a === 'edit-hist') histForm(byId('hist', id).rifleId, byId('hist', id));
   else if (a === 'del-group') deleteGroup(id);
+  else if (a === 'theme') { try { localStorage.setItem('theme', t.dataset.v); } catch (err) { /* private mode: applies for this visit only */ } applyTheme(t.dataset.v); viewAllKeepScroll(); }
+  else if (a === 'accent') { try { localStorage.setItem('accent', t.dataset.v); } catch (err) { /* private mode: applies for this visit only */ } applyTheme(themePref(), t.dataset.v); viewAllKeepScroll(); }
   else if (a === 'new-session') sessionForm(id, null);
   else if (a === 'edit-session') { const se = byId('sessions', id); if (se) sessionForm(se.rifleId, se); }
   else if (a === 'apply-update') { if (updateWorker) updateWorker.postMessage({ type: 'SKIP_WAITING' }); }
