@@ -124,3 +124,6 @@ table.la td{vertical-align:top}
 .thb.on{color:var(--accent-text);text-decoration:none}
 details.unproven{border:1px dashed var(--line2);border-radius:10px;padding:0 10px}
 details.unproven summary{min-height:44px;display:flex;align-items:center;cursor:pointer;font-weight:600;color:var(--mute)}
+
+/* group the user came from, highlighted in the session list */
+.hl{border:2px solid var(--accent-text);box-shadow:0 0 0 3px var(--accent-soft)}

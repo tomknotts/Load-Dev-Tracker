@@ -243,7 +243,25 @@ const bar = (left, title, right = '', rid = null) => {
   $('#bar').innerHTML = `${left || '<span style="min-width:64px"></span>'}${mid}${right || '<span style="min-width:64px"></span>'}`;
 };
 const main = (h) => { $('#main').innerHTML = h; window.scrollTo(0, 0); };
-const back = (href, label) => `<a href="${href}">← ${esc(label)}</a>`;
+/* In-app navigation depth, so Back retraces your steps (group -> session -> group ...). navIdx is kept in history.state, which survives reloads.
+   With no in-app history (opened on a deep link) Back falls back to the page's parent. */
+let navIdx = 0, pendingReplace = false;
+function initNav() {
+  const st = history.state;
+  if (st && typeof st.i === 'number') navIdx = st.i; else { navIdx = 0; history.replaceState({ i: 0 }, ''); }
+}
+function trackNav() {
+  const st = history.state;
+  if (st && typeof st.i === 'number') navIdx = st.i; // back / forward
+  else { if (!pendingReplace) navIdx += 1; history.replaceState({ i: navIdx }, ''); } // a new page, or a replacement of the current one
+  pendingReplace = false;
+}
+// replace = swap the current history entry (used after saving a form, so Back skips the form)
+function navTo(hash, replace) {
+  if (location.hash === hash) { pendingReplace = false; render(); return; }
+  if (replace) { pendingReplace = true; location.replace(hash); } else location.hash = hash;
+}
+const back = (href, label) => `<a href="${href}" data-back>← ${navIdx > 0 ? 'Back' : esc(label)}</a>`;
 const opts = (list, sel, lab, blank) => (blank ? `<option value="">${esc(blank)}</option>` : '') + list.map((x) => `<option value="${esc(x.id)}"${x.id === sel ? ' selected' : ''}>${esc(lab(x))}</option>`).join('');
 let F = { rid: null, powder: '', bullet: '', primer: '', charge: '', jump: '' };
 
@@ -309,10 +327,10 @@ function rifleForm(r) {
 }
 
 const comboHref = (c) => `#/combo/${c.groups[0].rifleId}/${encodeURIComponent(c.key)}`;
-function groupCard(g, showSess) {
+function groupCard(g, showSess, hl) {
   const s = gstats(g);
-  return `<a class="card ${g.include === false ? 'excl' : ''}" href="#/group/${g.id}">
-    <div class="row sb"><b>${esc(nm('powders', g.powderId))} ${g.charge} gn</b>${g.include === false ? '<span class="tag a">Excluded</span>' : g.reference ? '<span class="tag g">Ref</span>' : ''}</div>
+  return `<a class="card ${g.include === false ? 'excl' : ''}${hl ? ' hl' : ''}" href="#/group/${g.id}">
+    <div class="row sb"><b>${esc(nm('powders', g.powderId))} ${g.charge} gn</b><span class="row" style="gap:6px">${hl ? '<span class="tag g">from here</span>' : ''}${g.include === false ? '<span class="tag a">Excluded</span>' : ''}${g.reference ? '<span class="tag g">Ref</span>' : ''}</span></div>
     <div class="muted">${showSess && sessOf(g) ? esc(sessionLabel(sessOf(g))) + ' · ' : ''}${esc(bl(g.bulletId))} · ${esc(nm('primers', g.primerId))} · ${g.jump} thou · ${fin(g.distance) ? g.distance + ' yd' : 'no distance'} · RSC ${roundsSinceClean(g) ?? '—'}</div>
     <div class="grid4"><div><div class="lbl">MR</div><span class="mono v">${fmt(s.mr)}</span></div><div><div class="lbl">MR MOA</div><span class="mono v">${fmt(moa(s.mr, g.distance), 2)}</span></div><div><div class="lbl">ES</div><span class="mono v">${fmt(s.es)}</span></div><div><div class="lbl">Shots</div><span class="mono v">${s.total}</span></div></div></a>`;
 }
@@ -339,7 +357,7 @@ function viewRifle(rid) {
   main(`<div class="muted">${esc(calName(r.caliberId))}${r.barrel ? ' · ' + r.barrel + ' in barrel' : ''}</div>
     ${best ? `<a class="hero" href="${comboHref(best)}"><div class="lbl">Current best load · ${bd} yd</div><div style="font-size:19px;font-weight:600">${esc(bl(best.bulletId))} · ${esc(nm('powders', best.powderId))}</div>
       <div class="mono">${best.charge} gn · ${esc(nm('primers', best.primerId))} · ${best.jump} thou jump</div>
-      <div class="big mono">${fmt(best.mr)}"</div><div class="mono">${fmt(best.mrMoa, 2)} MOA</div><div>pooled mean radius · ${best.nGroups} groups · ${best.nShots} shots</div><div style="opacity:.85;font-size:13px">Tap to see its groups →</div></a>`
+      <div class="big mono">${fmt(best.mr)}"</div><div class="mono">MR ${fmt(best.mrMoa, 2)} MOA · ES ${fmt(best.esMoa, 2)} MOA</div><div style="opacity:.85;font-size:13px">Tap to see its groups →</div></a>`
       : `<div class="hero"><div class="lbl">Current best load · ${bd} yd</div><div style="font-size:19px;font-weight:600">Not enough data yet</div><div>Needs 2+ groups at the exact same Bullet + Powder + Charge + Primer + Jump at ${bd} yd. Other distances are on the Best Loads page.</div></div>`}
     <div class="grid2"><div class="card"><div class="lbl">Shots logged</div><div class="mono v" style="font-size:30px">${t.shots}</div></div>
     <div class="card"><div class="lbl">Barrel total</div><div class="mono v" style="font-size:30px">${t.barrel}</div><div class="muted">${t.start} start + ${t.shots} logged + ${t.fouling} fouling</div></div></div>
@@ -349,8 +367,7 @@ function viewRifle(rid) {
     <a class="btn" href="#/best/${rid}">Best Loads by Distance</a>
     <a class="btn" href="#/load/${rid}">Load Analysis</a>
     <a class="btn" href="#/sessions/${rid}">View Session Data</a>
-    <a class="btn" href="#/all/${rid}">View All Data</a>
-    ${cs.length ? `<h2>Loads · pooled by distance (Include = Y only)</h2>${cs.map((c) => comboRow(c, c === best)).join('')}` : ''}`);
+    <a class="btn" href="#/all/${rid}">View All Data</a>`);
 }
 
 function viewAll(rid) {
@@ -409,7 +426,7 @@ function viewSessions(rid) {
     <button class="btn dark" data-act="new-session" data-id="${rid}">+ Start New Session</button>`);
 }
 
-function viewSession(sid) {
+function viewSession(sid, hlId) {
   const se = byId('sessions', sid);
   if (!se) return viewHome();
   const rid = se.rifleId, gs = groupsOf(sid);
@@ -420,9 +437,10 @@ function viewSession(sid) {
     <div class="grid3"><div class="card"><div class="lbl">Groups</div><span class="mono v">${gs.length}</span></div>
     <div class="card"><div class="lbl">Shots</div><span class="mono v">${shots}</span></div>
     <div class="card"><div class="lbl">Since clean</div><span class="mono v">${(fin(se.fouling) ? se.fouling : 0) + shots}</span></div></div>
+    <div class="muted" style="margin-top:-6px">Since clean = rounds since clean at the end of this session (fouling shots + every shot fired).</div>
     <a class="btn dark" href="#/add/${sid}">+ Add Group to this session</a>
     <h2>Groups · in the order fired</h2>
-    ${gs.length ? gs.map((g) => groupCard(g)).join('') : '<div class="card muted">No groups in this session yet.</div>'}
+    ${gs.length ? gs.map((g) => groupCard(g, false, g.id === hlId)).join('') : '<div class="card muted">No groups in this session yet.</div>'}
     ${cs.length ? `<h2>Loads in this session · pooled across all sessions</h2>${cs.map((c) => comboRow(c, false)).join('')}` : ''}`);
 }
 
@@ -642,11 +660,10 @@ function viewGroup(gid) {
   if (!g) return viewHome();
   const s = gstats(g);
   const se = sessOf(g) || {};
-  bar(back('#/session/' + g.sessionId, 'Session'), 'Group · ' + gdate(g), `<a class="r" href="#/edit/${gid}">Edit</a>`, g.rifleId);
+  bar(back('#/session/' + g.sessionId + '?g=' + gid, 'Session'), 'Group · ' + gdate(g), `<a class="r" href="#/edit/${gid}">Edit</a>`, g.rifleId);
   const sess = groupsOf(g.sessionId);
   main(`<div><h1 style="font-size:24px">${esc(se.id ? sessionLabel(se) : '—')} · Group ${sess.findIndex((x) => x.id === g.id) + 1}</h1>
     <div class="muted">${esc(bl(g.bulletId))} · ${esc(nm('powders', g.powderId))} ${g.charge} gn · ${esc(nm('primers', g.primerId))} · ${g.jump} thou · ${fin(g.distance) ? g.distance + ' yd' : 'no distance'}</div>
-    <div class="muted">${fin(se.temp) ? se.temp + ' F · ' : ''}${esc(se.wind || '')}</div>
     <div class="row" style="margin-top:6px">${g.include === false ? '<span class="tag a">Excluded from analysis</span>' : '<span class="tag g">Included</span>'}${g.reference ? '<span class="tag g">Reference group</span>' : ''}</div></div>
     <div class="hero"><div class="grid2"><div><div class="lbl">Mean radius</div><div class="big mono">${fmt(s.mr)}"</div><div class="mono">${fmt(moa(s.mr, g.distance), 2)} MOA</div></div><div><div class="lbl">ES (center)</div><div class="big mono">${fmt(s.es)}"</div><div class="mono">${fmt(moa(s.es, g.distance), 2)} MOA</div></div></div>
       <div style="opacity:.85;font-size:13px">at ${fin(g.distance) ? g.distance + ' yd' : '— (set a distance to see MOA)'}</div></div>
@@ -664,10 +681,14 @@ function viewGroup(gid) {
       <div class="kv"><span>Average</span><b>${fin(s.vavg) ? s.vavg.toFixed(0) + ' fps' : '—'}</b></div>
       <div class="kv"><span>Std dev (sample)</span><b>${fmt(s.vsd, 1)}</b></div>
       <div class="kv"><span>Extreme spread</span><b>${fmt(s.ves, 0)}</b></div></div>
-    <div class="card"><div class="row sb"><div class="lbl">Session</div><button class="btn sm" data-act="edit-session" data-id="${g.sessionId}">Edit session</button></div>
+    <div class="card"><a href="#/session/${g.sessionId}?g=${g.id}" style="display:flex;flex-direction:column;gap:8px;color:inherit">
+      <div class="row sb"><div class="lbl">Session · tap to see all its groups</div><span aria-hidden="true">→</span></div>
+      <b>${esc(se.id ? sessionLabel(se) : '—')}</b>
+      <div class="muted">${fin(se.temp) ? se.temp + ' F · ' : ''}${esc(se.wind || 'no wind noted')}</div>
       <div class="kv"><span>Session fouling shots</span><b>${fin(se.fouling) ? se.fouling : 0}</b></div>
-      <div class="kv"><span>Rounds since clean (at start of group)</span><b>${roundsSinceClean(g) ?? '—'}</b></div>
-      <div class="kv"><span>COAL / trimmed length</span><b>${fin(g.coal) ? g.coal : '—'} / ${fin(g.trim) ? g.trim : '—'}</b></div></div>
+      <div class="kv"><span>Rounds since clean (at start of group)</span><b>${roundsSinceClean(g) ?? '—'}</b></div></a>
+      <div class="kv"><span>COAL / trimmed length</span><b>${fin(g.coal) ? g.coal : '—'} / ${fin(g.trim) ? g.trim : '—'}</b></div>
+      <button class="btn sm" data-act="edit-session" data-id="${g.sessionId}">Edit session</button></div>
     <div class="card"><div class="lbl">Shots</div><table><thead><tr><th>#</th><th>Vel</th><th>X</th><th>Y</th><th>Rad</th></tr></thead><tbody>
       ${g.shots.map((p, i) => `<tr><td>${i + 1}</td><td>${fin(p.v) ? p.v : '—'}</td><td>${sfmt(p.x)}</td><td>${sfmt(p.y)}</td><td>${fin(p.x) && fin(p.y) && s.cx !== null ? fmt(Math.hypot(p.x - s.cx, p.y - s.cy)) : '—'}</td></tr>`).join('')}</tbody></table></div>
     ${g.notes ? `<div class="card"><div class="lbl">Notes</div>${esc(g.notes)}</div>` : ''}
@@ -772,13 +793,14 @@ async function saveGroup(rid, gid, g0) {
   };
   if (!g.bulletId || !g.powderId || !g.primerId) return toast('Pick bullet, powder and primer');
   await put('groups', g);
-  location.hash = '#/group/' + g.id;
+  if (g0 && navIdx > 0) history.back(); // editing: return to the group page we came from (re-rendered with the new numbers)
+  else navTo('#/group/' + g.id, true);
 }
 async function deleteGroup(id) {
   const g = byId('groups', id);
   if (!g || !confirm('Delete this group? This cannot be undone.')) return;
   await del('groups', id);
-  location.hash = '#/rifle/' + g.rifleId;
+  navTo('#/rifle/' + g.rifleId, true); // the deleted group's page must not stay in history
 }
 
 /* ---------- sessions ---------- */
@@ -870,13 +892,13 @@ function render() {
     else if (p[0] === 'best') viewBest(p[1]);
     else if (p[0] === 'load') viewLoad(p[1]);
     else if (p[0] === 'sessions') viewSessions(p[1]);
-    else if (p[0] === 'session') viewSession(p[1]);
+    else if (p[0] === 'session') { viewSession(p[1], q.get('g')); const h = $('.hl'); if (h) h.scrollIntoView({ block: 'center' }); }
     else if (p[0] === 'combo') viewCombo(p[1], decodeURIComponent(p[2] || ''));
     else if (p[0] === 'add') {
       let se = byId('sessions', p[1]); // #/add/<sessionId>; a rifle id means "latest session"
       if (!se && byId('rifles', p[1])) se = latestSession(p[1]);
       if (se) viewGroupForm(se.rifleId, null, q.get('from'), se.id);
-      else if (byId('rifles', p[1])) { location.replace('#/rifle/' + p[1]); toast('Start a session first'); }
+      else if (byId('rifles', p[1])) { navTo('#/rifle/' + p[1], true); toast('Start a session first'); }
       else viewHome();
     }
     else if (p[0] === 'edit') { const g = byId('groups', p[1]); g ? viewGroupForm(g.rifleId, g.id) : viewHome(); }
@@ -919,9 +941,11 @@ function initUpdates() {
   let reloading = false;
   navigator.serviceWorker.addEventListener('controllerchange', () => { if (!reloading && updateWorker) { reloading = true; location.reload(); } });
 }
-window.addEventListener('hashchange', render);
+window.addEventListener('hashchange', () => { trackNav(); render(); });
 
 document.addEventListener('click', (e) => {
+  const bk = e.target.closest('a[data-back]');
+  if (bk && navIdx > 0) { e.preventDefault(); history.back(); return; }
   const t = e.target.closest('[data-act]');
   if (!t) return;
   const a = t.dataset.act, id = t.dataset.id;
@@ -986,6 +1010,7 @@ function viewAllKeepScroll() { const y = window.scrollY; render(); window.scroll
     main(`<div class="card"><b>Storage unavailable.</b><div class="muted">${esc(e.message)}. This app needs IndexedDB (not private-browsing mode).</div></div>`);
     return;
   }
+  initNav();
   render();
   initUpdates();
 })();
