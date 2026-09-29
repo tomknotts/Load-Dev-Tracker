@@ -114,3 +114,13 @@ svg.plot{width:100%;height:auto;background:var(--field);border:1px solid var(--l
   :root[data-accent="orange"]:not([data-theme="light"]){--accent:#b5500f;--accent-text:#ffa663;--accent-soft:#3a2410;--accent-ring:#d0793a}
 }
 .swatch{display:inline-block;width:14px;height:14px;border-radius:7px;margin-right:8px;border:2px solid var(--on-accent);box-shadow:0 0 0 1px var(--line2)}
+
+/* Load Analysis */
+table.la td small{display:block;font-size:11px;color:var(--mute);font-family:system-ui,sans-serif;line-height:1.25}
+table.la td:first-child a{color:inherit}
+table.la tbody tr{cursor:pointer}
+table.la td{vertical-align:top}
+.thb{background:none;border:0;padding:0;min-height:36px;font:inherit;color:inherit;text-transform:inherit;letter-spacing:inherit;cursor:pointer;text-align:right;text-decoration:underline dotted}
+.thb.on{color:var(--accent-text);text-decoration:none}
+details.unproven{border:1px dashed var(--line2);border-radius:10px;padding:0 10px}
+details.unproven summary{min-height:44px;display:flex;align-items:center;cursor:pointer;font-weight:600;color:var(--mute)}

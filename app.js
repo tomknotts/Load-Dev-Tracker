@@ -347,6 +347,7 @@ function viewRifle(rid) {
     ${latest ? `<a class="btn dark" href="#/add/${rid}">+ Add New Group</a>` : ''}
     <button class="btn ${latest ? '' : 'dark'}" data-act="new-session" data-id="${rid}">+ Start New Session</button>
     <a class="btn" href="#/best/${rid}">Best Loads by Distance</a>
+    <a class="btn" href="#/load/${rid}">Load Analysis</a>
     <a class="btn" href="#/sessions/${rid}">View Session Data</a>
     <a class="btn" href="#/all/${rid}">View All Data</a>
     ${cs.length ? `<h2>Loads · pooled by distance (Include = Y only)</h2>${cs.map((c) => comboRow(c, c === best)).join('')}` : ''}`);
@@ -463,6 +464,136 @@ function viewBest(rid) {
   main(`<h1>Best Loads</h1><div class="muted">Ranked by pooled mean radius within each distance, since the best load at 100 yd may not be best at 300. Include = N groups are left out.</div>
     <label class="row" style="min-height:44px;font-weight:600"><input type="checkbox" id="best-thin" style="width:24px;height:24px"${showThin ? ' checked' : ''}> Show loads with only 1 group (not ranked)</label>
     ${sections || '<div class="card muted">No groups logged yet.</div>'}`);
+}
+
+/* ---------- Load Analysis: pick a bullet + powder, see the best load at every tested distance ----------
+   Pure view on top of combos() (same six-field rule: bullet, powder, charge, primer, jump, distance; Include = N left out; 2+ groups to rank).
+   Only new math: velocity SD / ES pooled from the shot-level velocities of a combo (velPool). Selections live in memory only. */
+let LA = { rid: null, bullet: '', powder: '', powderB: '', sort: 'mr', thin: false, ladderThin: false, compare: false };
+function velPool(c) {
+  const v = [];
+  for (const g of c.groups) for (const s of g.shots) if (fin(s.v)) v.push(s.v);
+  const n = v.length;
+  if (n < 2) return { n, sd: null, es: null };
+  const mean = v.reduce((a, x) => a + x, 0) / n;
+  return { n, sd: Math.sqrt(v.reduce((a, x) => a + (x - mean) ** 2, 0) / (n - 1)), es: Math.max(...v) - Math.min(...v) };
+}
+const laSorts = { mr: (a, b) => (a.c.mr ?? 9e9) - (b.c.mr ?? 9e9), vsd: (a, b) => (a.vp.sd ?? 9e9) - (b.vp.sd ?? 9e9), ves: (a, b) => (a.vp.es ?? 9e9) - (b.vp.es ?? 9e9) };
+const laItems = (cs) => cs.map((c) => ({ c, vp: velPool(c) }));
+
+function laTable(items, bestId) {
+  const th = (k, l) => `<th><button type="button" class="thb${LA.sort === k ? ' on' : ''}" data-act="la-sort" data-v="${k}">${l}${LA.sort === k ? ' ▲' : ''}</button></th>`;
+  const rows = items.slice().sort(laSorts[LA.sort]).map(({ c, vp }) => `<tr data-act="go" data-href="${comboHref(c)}">
+      <td><a href="${comboHref(c)}"><b>${c.charge}</b> gn${c === bestId ? ' <span class="tag g">best MR</span>' : ''}</a><small>${esc(nm('primers', c.primerId))} · ${c.jump} thou</small></td>
+      <td>${fmt(c.mr)}<small>n=${c.groups.reduce((a, g) => a + gstats(g).n, 0)} · ${fmt(c.mrMoa, 2)} MOA</small></td>
+      <td>${fmt(vp.sd, 1)}<small>n=${vp.n}</small></td>
+      <td>${fmt(vp.es, 0)}<small>n=${vp.n}</small></td>
+      <td>${c.nGroups}<small>${c.nShots} shots</small></td></tr>`).join('');
+  return `<table class="la"><thead><tr><th>Charge</th>${th('mr', 'MR in')}${th('vsd', 'Vel SD')}${th('ves', 'Vel ES')}<th>Grp</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+function ladderChart(series, key, title, digits) {
+  const pts = series.flatMap((s) => s.pts.filter((p) => fin(p[key])));
+  const charges = [...new Set(pts.map((p) => p.x))].sort((a, b) => a - b);
+  if (!pts.length || charges.length < 2) return '';
+  const ys = pts.map((p) => p[key]);
+  let y0 = Math.min(...ys), y1 = Math.max(...ys);
+  if (y0 === y1) { const d = Math.abs(y0) * 0.05 || 1; y0 -= d; y1 += d; }
+  const pad = (y1 - y0) * 0.15; y0 -= pad; y1 += pad;
+  const x0 = charges[0], x1 = charges[charges.length - 1];
+  const W = 340, H = 150, L = 46, R = 10, T = 10, B = 26;
+  const X = (x) => L + (x - x0) / (x1 - x0) * (W - L - R), Y = (y) => T + (1 - (y - y0) / (y1 - y0)) * (H - T - B);
+  const lab = (v) => (digits ? v.toFixed(digits) : String(Math.round(v)));
+  const txt = 'font-size="11" style="fill:var(--mute)"';
+  const step = Math.ceil(charges.length / 7);
+  const cols = ['var(--accent-text)', 'var(--amber)', 'var(--red)', 'var(--mute)'];
+  return `<div class="lbl" style="margin-top:8px">${title}</div>
+    <svg viewBox="0 0 ${W} ${H}" class="plot" role="img" aria-label="${esc(title)} by charge weight">
+    ${[y0 + pad, (y0 + y1) / 2, y1 - pad].map((v) => `<line x1="${L}" x2="${W - R}" y1="${Y(v)}" y2="${Y(v)}" style="stroke:var(--line)"/><text x="${L - 4}" y="${Y(v) + 4}" text-anchor="end" ${txt}>${lab(v)}</text>`).join('')}
+    ${charges.map((c, i) => (i % step ? '' : `<text x="${X(c)}" y="${H - 8}" text-anchor="middle" ${txt}>${c}</text>`)).join('')}
+    ${series.map((s, si) => {
+      const col = cols[si % cols.length];
+      const good = s.pts.filter((p) => fin(p[key]) && p.proven).sort((a, b) => a.x - b.x);
+      return `${good.length > 1 ? `<polyline fill="none" style="stroke:${col}" stroke-width="2" points="${good.map((p) => X(p.x) + ',' + Y(p[key])).join(' ')}"/>` : ''}
+        ${s.pts.filter((p) => fin(p[key])).map((p) => `<circle cx="${X(p.x)}" cy="${Y(p[key])}" r="5" stroke-width="2" style="stroke:${col};fill:${p.proven ? col : 'var(--field)'}"/>`).join('')}`;
+    }).join('')}</svg>`;
+}
+
+function laLadder(items) {
+  const map = new Map();
+  for (const { c, vp } of items) {
+    const k = c.primerId + '|' + c.jump;
+    if (!map.has(k)) map.set(k, { label: `${nm('primers', c.primerId)} · ${c.jump} thou`, pts: [] });
+    map.get(k).pts.push({ x: Number(c.charge), mr: c.mr, vel: c.vel, proven: c.nGroups >= 2 });
+  }
+  const series = [...map.values()];
+  const a = ladderChart(series, 'mr', 'Mean radius (in) by charge', 3), b = ladderChart(series, 'vel', 'Average velocity (fps) by charge', 0);
+  if (!a && !b) return '<div class="muted">Charge ladder needs 2+ different charges.</div>';
+  return `${a}${b}${series.length > 1 ? `<div class="muted">${series.map((s, i) => `<span style="color:${['var(--accent-text)', 'var(--amber)', 'var(--red)', 'var(--mute)'][i % 4]}">●</span> ${esc(s.label)}`).join(' &nbsp; ')}</div>` : ''}
+    <div class="muted">Filled = 2+ groups. Hollow = single group (unproven).</div>`;
+}
+
+function laPanel(title, items, d) {
+  const ranked = items.filter(({ c }) => c.nGroups >= 2 && c.mr !== null).sort(laSorts.mr);
+  const best = ranked[0];
+  if (best) {
+    const { c, vp } = best;
+    return `<div class="card"><b>${esc(title)}</b>
+      <div class="mono v">${c.charge} gn</div><div class="muted">${esc(nm('primers', c.primerId))} · ${c.jump} thou</div>
+      <div class="kv"><span>MR</span><b>${fmt(c.mr)}</b></div><div class="muted" style="text-align:right">n=${c.groups.reduce((a, g) => a + gstats(g).n, 0)} · ${fmt(c.mrMoa, 2)} MOA</div>
+      <div class="kv"><span>Vel SD</span><b>${fmt(vp.sd, 1)}</b></div><div class="kv"><span>Vel ES</span><b>${fmt(vp.es, 0)}</b></div><div class="muted" style="text-align:right">n=${vp.n} shots with velocity</div>
+      <div class="kv"><span>Groups</span><b>${c.nGroups}</b></div><div class="muted" style="text-align:right">${c.nShots} shots</div>
+      <a class="btn sm" href="${comboHref(c)}">See groups</a></div>`;
+  }
+  return `<div class="card"><b>${esc(title)}</b><div class="warn">Not enough data yet</div>
+    ${items.length ? items.map(({ c }) => `<div class="muted">${c.charge} gn · ${esc(nm('primers', c.primerId))} · ${c.jump} thou — MR ${fmt(c.mr)} (${c.nGroups} group, ${c.nShots} shots)</div>`).join('') : '<div class="muted">No groups at this distance.</div>'}</div>`;
+}
+
+function viewLoad(rid) {
+  const r = byId('rifles', rid);
+  if (!r) return viewHome();
+  if (LA.rid !== rid) LA = { rid, bullet: '', powder: '', powderB: '', sort: 'mr', thin: false, ladderThin: false, compare: false };
+  bar(back('#/rifle/' + rid, 'Back'), 'Load Analysis', '', rid);
+  const all = S.groups.filter((g) => g.rifleId === rid);
+  const usedIds = (k) => new Set(all.map((g) => g[k]));
+  const bullets = S.bullets.filter((b) => usedIds('bulletId').has(b.id)), powders = S.powders.filter((p) => usedIds('powderId').has(p.id));
+  const inSel = (g, pw) => (!LA.bullet || g.bulletId === LA.bullet) && (!pw || g.powderId === pw);
+  const sel = (id, label, list, val, any) => `<div class="f"><label class="lbl" for="${id}">${label}</label><select class="in" style="min-height:48px;font-size:16px" id="${id}">${opts(list, val, (x) => x.name + (fin(x.weight) ? ' ' + x.weight + ' gn' : ''), any)}</select></div>`;
+  const controls = `<div class="grid2">${sel('la-bullet', 'Bullet', bullets, LA.bullet, 'Any')}${sel('la-powder', LA.compare ? 'Powder A' : 'Powder', powders, LA.powder, 'Any')}</div>
+    ${LA.compare ? sel('la-powderB', 'Powder B', powders, LA.powderB, 'Pick a powder') : ''}
+    <label class="row" style="min-height:44px;font-weight:600"><input type="checkbox" id="la-compare" style="width:24px;height:24px"${LA.compare ? ' checked' : ''}> Compare powders</label>`;
+
+  if (LA.compare) {
+    let body;
+    if (!LA.bullet) body = '<div class="card muted">Pick a bullet to compare powders.</div>';
+    else if (!LA.powder || !LA.powderB) body = '<div class="card muted">Pick Powder A and Powder B.</div>';
+    else if (LA.powder === LA.powderB) body = '<div class="card muted">Pick two different powders.</div>';
+    else {
+      const cA = laItems(combos(all.filter((g) => inSel(g, LA.powder)))), cB = laItems(combos(all.filter((g) => inSel(g, LA.powderB))));
+      const dists = [...new Set([...cA, ...cB].map(({ c }) => Number(c.distance)))].sort((a, b) => a - b);
+      body = dists.map((d) => `<h2>${d} yd</h2><div class="grid2">${laPanel(nm('powders', LA.powder), cA.filter(({ c }) => Number(c.distance) === d), d)}${laPanel(nm('powders', LA.powderB), cB.filter(({ c }) => Number(c.distance) === d), d)}</div>`).join('')
+        || '<div class="card muted">Not enough data yet.</div>';
+    }
+    main(`<h1>Load Analysis</h1>${controls}<div class="muted">Each powder's best load (lowest pooled mean radius, 2+ groups) at each tested distance.</div>${body}`);
+    return;
+  }
+
+  const cs = laItems(combos(all.filter((g) => inSel(g, LA.powder))));
+  const dists = [...new Set(cs.map(({ c }) => Number(c.distance)))].sort((a, b) => a - b);
+  const ladderOn = !!(LA.bullet && LA.powder);
+  const sections = dists.map((d) => {
+    const at = cs.filter(({ c }) => Number(c.distance) === d);
+    const ranked = at.filter(({ c }) => c.nGroups >= 2 && c.mr !== null), thin = at.filter((x) => !ranked.includes(x));
+    const bestC = ranked.slice().sort(laSorts.mr)[0];
+    return `<h2>${d} yd</h2>
+      ${ranked.length ? laTable(ranked, bestC && bestC.c) : `<div class="card muted">Not enough data yet.${thin.length ? ` (${thin.length} load${thin.length === 1 ? '' : 's'} with 1 group below.)` : ''}</div>`}
+      ${thin.length ? `<details class="unproven"><summary>Unproven (1 group) · ${thin.length}</summary>${laTable(thin, null)}</details>` : ''}
+      ${ladderOn ? laLadder(at.filter((x) => LA.ladderThin || x.c.nGroups >= 2)) : ''}`;
+  }).join('');
+  main(`<h1>Load Analysis</h1>${controls}
+    ${ladderOn ? `<label class="row" style="min-height:44px;font-weight:600"><input type="checkbox" id="la-ladderthin" style="width:24px;height:24px"${LA.ladderThin ? ' checked' : ''}> Include single-group points in the ladder</label>` : '<div class="muted">Pick both a bullet and a powder to see the charge ladder.</div>'}
+    <div class="muted">Best load at each tested distance. Ranked by pooled mean radius; tap Vel SD or Vel ES to re-sort. Metrics are never blended. Include = N groups are left out.</div>
+    ${sections || '<div class="card muted">Not enough data yet.</div>'}`);
 }
 
 /* Calibers are a library. A rifle and a bullet are linked by sharing the same caliber; the group form's bullet list follows the rifle. */
@@ -737,6 +868,7 @@ function render() {
     else if (p[0] === 'rifle') viewRifle(p[1]);
     else if (p[0] === 'all') viewAll(p[1]);
     else if (p[0] === 'best') viewBest(p[1]);
+    else if (p[0] === 'load') viewLoad(p[1]);
     else if (p[0] === 'sessions') viewSessions(p[1]);
     else if (p[0] === 'session') viewSession(p[1]);
     else if (p[0] === 'combo') viewCombo(p[1], decodeURIComponent(p[2] || ''));
@@ -802,6 +934,8 @@ document.addEventListener('click', (e) => {
   else if (a === 'del-group') deleteGroup(id);
   else if (a === 'theme') { try { localStorage.setItem('theme', t.dataset.v); } catch (err) { /* private mode: applies for this visit only */ } applyTheme(t.dataset.v); viewAllKeepScroll(); }
   else if (a === 'accent') { try { localStorage.setItem('accent', t.dataset.v); } catch (err) { /* private mode: applies for this visit only */ } applyTheme(themePref(), t.dataset.v); viewAllKeepScroll(); }
+  else if (a === 'go') { if (!e.target.closest('a')) location.hash = t.dataset.href; }
+  else if (a === 'la-sort') { LA.sort = t.dataset.v; viewAllKeepScroll(); }
   else if (a === 'new-session') sessionForm(id, null);
   else if (a === 'edit-session') { const se = byId('sessions', id); if (se) sessionForm(se.rifleId, se); }
   else if (a === 'apply-update') { if (updateWorker) updateWorker.postMessage({ type: 'SKIP_WAITING' }); }
@@ -822,6 +956,11 @@ document.addEventListener('change', (e) => {
   const k = e.target.dataset && e.target.dataset.filter;
   if (k) { F[k] = e.target.value; viewAllKeepScroll(); }
   if (e.target.id === 'best-thin') { showThin = e.target.checked; viewAllKeepScroll(); }
+  if (e.target.id === 'la-bullet') { LA.bullet = e.target.value; viewAllKeepScroll(); }
+  if (e.target.id === 'la-powder') { LA.powder = e.target.value; viewAllKeepScroll(); }
+  if (e.target.id === 'la-powderB') { LA.powderB = e.target.value; viewAllKeepScroll(); }
+  if (e.target.id === 'la-compare') { LA.compare = e.target.checked; viewAllKeepScroll(); }
+  if (e.target.id === 'la-ladderthin') { LA.ladderThin = e.target.checked; viewAllKeepScroll(); }
   if (e.target.id === 'pref-dist') {
     const n = num(e.target.value);
     S.cfg.bestDist = n !== null && n > 0 ? Math.round(n) : 100;
