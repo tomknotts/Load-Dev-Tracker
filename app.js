@@ -495,6 +495,10 @@ function viewGroupForm(rid, gid, fromId, sid) {
   const curSid = g0 ? g0.sessionId : sid;
   const sessOpts = sessionsOf(rid).sort((a, b) => b.date.localeCompare(a.date) || b.ts - a.ts)
     .map((x) => `<option value="${x.id}"${x.id === curSid ? ' selected' : ''}>${esc(sessionLabel(x))} · ${fin(x.fouling) ? x.fouling : 0} fouling</option>`).join('');
+  const cals = [...new Set(S.bullets.map((b) => b.caliber).filter(Boolean))];
+  const defCal = ((byId('bullets', src.bulletId) || {}).caliber) || cals.find((c) => calMatch(c, r.caliber)) || '';
+  const bOpts = (cal, keep) => opts(cal ? S.bullets.filter((b) => !calNorm(b.caliber) || calNorm(b.caliber) === calNorm(cal) || b.id === keep) : S.bullets, keep,
+    (x) => x.name + (fin(x.weight) ? ' ' + x.weight + ' gn' : ''));
   const nShots = g0 ? g0.shots.length : 5;
   const sec = (t) => `<h2 style="color:var(--green);border-color:var(--green)">${t}</h2>`;
   const fld = (id, label, val, cls = 'm', extra = '') => `<div class="f"><label class="lbl" for="${id}">${label}</label><input class="in ${cls}" id="${id}" type="text" ${cls === 'm' ? 'inputmode="decimal"' : ''} value="${esc(val ?? '')}" autocomplete="off" ${extra}></div>`;
@@ -505,8 +509,9 @@ function viewGroupForm(rid, gid, fromId, sid) {
     <div class="f"><label class="lbl" for="f-session">Session</label><select class="in" id="f-session">${sessOpts}</select></div>
     <div class="muted">Date, wind, temp and fouling shots belong to the session. Change them with Edit session on the rifle or group page.</div>
     ${sec('LOAD')}
-    <div class="f"><label class="lbl" for="f-bullet">Bullet</label><select class="in" id="f-bullet">${opts(bulletsFor(rid, src.bulletId), src.bulletId, (x) => x.name + (fin(x.weight) ? ' ' + x.weight + ' gn' : ''))}</select>
-    <div class="muted">Bullets for ${esc(r.caliber || 'this rifle')}${S.bullets.some((b) => !calNorm(b.caliber)) ? ', plus any with no caliber set' : ''}. Set a bullet's caliber in Settings.</div></div>
+    <div class="f"><label class="lbl" for="f-cal">Caliber</label><select class="in" id="f-cal"><option value="">All calibers</option>${cals.map((c) => `<option${calNorm(c) === calNorm(defCal) ? ' selected' : ''}>${esc(c)}</option>`).join('')}</select></div>
+    <div class="f"><label class="lbl" for="f-bullet">Bullet</label><select class="in" id="f-bullet">${bOpts(defCal, src.bulletId)}</select>
+    <div class="muted">Pick a caliber to narrow the list. Bullets with no caliber set always show. Set a bullet's caliber in Settings.</div></div>
     <div class="f"><label class="lbl" for="f-powder">Powder</label><select class="in" id="f-powder">${opts(S.powders, src.powderId, (x) => x.name)}</select></div>
     <div class="grid2">${fld('f-charge', 'Charge (gn)', src.charge)}${fld('f-jump', 'Jump (thou off lands)', src.jump)}</div>
     <div class="f"><label class="lbl" for="f-primer">Primer</label><select class="in" id="f-primer">${opts(S.primers, src.primerId, (x) => x.name)}</select></div>
@@ -525,7 +530,10 @@ function viewGroupForm(rid, gid, fromId, sid) {
     <button class="btn pri" type="submit" ${missing ? 'disabled' : ''}>Save group</button></form>`);
   const form = $('#gform');
   form.addEventListener('input', preview);
-  form.addEventListener('change', preview);
+  form.addEventListener('change', (e) => {
+    if (e.target.id === 'f-cal') $('#f-bullet').innerHTML = bOpts(e.target.value, null);
+    preview();
+  });
   form.onsubmit = (e) => { e.preventDefault(); saveGroup(rid, gid, g0); };
   preview();
 }
