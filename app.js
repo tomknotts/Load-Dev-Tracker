@@ -432,6 +432,7 @@ function viewCombo(rid, key) {
 }
 
 // Best loads, one section per distance. A load needs 2+ groups (same bullet, powder, charge, primer, jump, distance) to be ranked.
+let showThin = false; // Best page: off by default, so only ranked loads show
 function viewBest(rid) {
   const r = byId('rifles', rid);
   if (!r) return viewHome();
@@ -443,10 +444,11 @@ function viewBest(rid) {
     const ranked = at.filter((c) => c.nGroups >= 2 && c.mr !== null).sort((a, b) => a.mr - b.mr);
     const rest = at.filter((c) => !ranked.includes(c));
     return `<h2>${fin(d) ? d + ' yd' : 'No distance set'}</h2>
-      ${ranked.map((c, i) => comboRow(c, i === 0, i + 1)).join('') || '<div class="card muted">No load has 2+ groups at this distance yet.</div>'}
-      ${rest.length ? `<div class="muted">Not enough data yet (needs 2+ groups):</div>${rest.map((c) => comboRow(c, false)).join('')}` : ''}`;
+      ${ranked.map((c, i) => comboRow(c, i === 0, i + 1)).join('') || `<div class="card muted">No load has 2+ groups at this distance yet.${rest.length && !showThin ? ` (${rest.length} with 1 group — use the toggle above to see ${rest.length === 1 ? 'it' : 'them'}.)` : ''}</div>`}
+      ${showThin && rest.length ? `<div class="muted">Not enough data yet (needs 2+ groups):</div>${rest.map((c) => comboRow(c, false)).join('')}` : ''}`;
   }).join('');
   main(`<h1>Best Loads</h1><div class="muted">Ranked by pooled mean radius within each distance, since the best load at 100 yd may not be best at 300. Include = N groups are left out.</div>
+    <label class="row" style="min-height:44px;font-weight:600"><input type="checkbox" id="best-thin" style="width:24px;height:24px"${showThin ? ' checked' : ''}> Show loads with only 1 group (not ranked)</label>
     ${sections || '<div class="card muted">No groups logged yet.</div>'}`);
 }
 
@@ -799,6 +801,7 @@ document.addEventListener('keydown', (e) => { if ((e.key === 'Enter' || e.key ==
 document.addEventListener('change', (e) => {
   const k = e.target.dataset && e.target.dataset.filter;
   if (k) { F[k] = e.target.value; viewAllKeepScroll(); }
+  if (e.target.id === 'best-thin') { showThin = e.target.checked; viewAllKeepScroll(); }
   if (e.target.id === 'pref-dist') {
     const n = num(e.target.value);
     S.cfg.bestDist = n !== null && n > 0 ? Math.round(n) : 100;
