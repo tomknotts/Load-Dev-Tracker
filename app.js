@@ -239,29 +239,45 @@ const comboLabel = (c) => `${bl(c.bulletId)} · ${nm('powders', c.powderId)} ${c
 // With rid, the middle of the bar shows the rifle name (tap = that rifle's main page) and the page name underneath.
 const bar = (left, title, right = '', rid = null) => {
   const r = rid && byId('rifles', rid);
-  const mid = r ? `<a class="t" href="#/rifle/${rid}"><span class="n">${esc(r.name)}</span><small>${esc(title)}</small></a>` : `<div class="t">${esc(title)}</div>`;
+  const mid = r ? `<a class="t" href="#/rifle/${rid}" data-up><span class="n">${esc(r.name)}</span><small>${esc(title)}</small></a>` : `<div class="t">${esc(title)}</div>`;
   $('#bar').innerHTML = `${left || '<span style="min-width:64px"></span>'}${mid}${right || '<span style="min-width:64px"></span>'}`;
 };
 const main = (h) => { $('#main').innerHTML = h; window.scrollTo(0, 0); };
 /* In-app navigation depth, so Back retraces your steps (group -> session -> group ...). navIdx is kept in history.state, which survives reloads.
    With no in-app history (opened on a deep link) Back falls back to the page's parent. */
-let navIdx = 0, pendingReplace = false;
+let navIdx = 0, pendingReplace = false, navHashes = []; // navHashes[i] = the page at history depth i (kept in sessionStorage)
+const saveNav = () => { try { sessionStorage.setItem('navstack', JSON.stringify(navHashes)); } catch (e) { /* fine without it */ } };
 function initNav() {
   const st = history.state;
-  if (st && typeof st.i === 'number') navIdx = st.i; else { navIdx = 0; history.replaceState({ i: 0 }, ''); }
+  try { navHashes = JSON.parse(sessionStorage.getItem('navstack') || '[]'); } catch (e) { navHashes = []; }
+  if (st && typeof st.i === 'number') navIdx = st.i; else { navIdx = 0; navHashes = []; history.replaceState({ i: 0 }, ''); }
+  navHashes.length = navIdx + 1; navHashes[navIdx] = location.hash || '#/'; saveNav();
 }
 function trackNav() {
   const st = history.state;
-  if (st && typeof st.i === 'number') navIdx = st.i; // back / forward
-  else { if (!pendingReplace) navIdx += 1; history.replaceState({ i: navIdx }, ''); } // a new page, or a replacement of the current one
-  pendingReplace = false;
+  if (st && typeof st.i === 'number') { navIdx = st.i; navHashes[navIdx] = location.hash || '#/'; } // back / forward
+  else { // a new page, or a replacement of the current one
+    if (!pendingReplace) navIdx += 1;
+    history.replaceState({ i: navIdx }, '');
+    navHashes.length = navIdx; navHashes[navIdx] = location.hash || '#/';
+  }
+  pendingReplace = false; saveNav();
+}
+/* "Up" links (top-level pages: rifle -> home, lists -> rifle, and the rifle name in the bar): if the target page is already earlier in this
+   history, jump back to it instead of stacking a new copy. That is what stops Back from ping-ponging between the same pages. */
+function goUp(href) {
+  const target = href.split('?')[0];
+  if (target === (location.hash || '#/').split('?')[0]) { window.scrollTo(0, 0); return; }
+  for (let k = navIdx - 1; k >= 0; k--) if (navHashes[k] && navHashes[k].split('?')[0] === target) { history.go(k - navIdx); return; }
+  navTo(href, true);
 }
 // replace = swap the current history entry (used after saving a form, so Back skips the form)
 function navTo(hash, replace) {
   if (location.hash === hash) { pendingReplace = false; render(); return; }
   if (replace) { pendingReplace = true; location.replace(hash); } else location.hash = hash;
 }
-const back = (href, label) => `<a href="${href}" data-back>← ${navIdx > 0 ? 'Back' : esc(label)}</a>`;
+// up = a top-level page: always goes to its parent. Otherwise Back retraces your steps (falls back to the parent with no history).
+const back = (href, label, up) => (up ? `<a href="${href}" data-up>← ${esc(label)}</a>` : `<a href="${href}" data-back>← ${navIdx > 0 ? 'Back' : esc(label)}</a>`);
 const opts = (list, sel, lab, blank) => (blank ? `<option value="">${esc(blank)}</option>` : '') + list.map((x) => `<option value="${esc(x.id)}"${x.id === sel ? ' selected' : ''}>${esc(lab(x))}</option>`).join('');
 let F = { rid: null, powder: '', bullet: '', primer: '', charge: '', jump: '' };
 
@@ -347,7 +363,7 @@ function comboRow(c, best, rank) {
 function viewRifle(rid) {
   const r = byId('rifles', rid);
   if (!r) return viewHome();
-  bar(back('#/', 'Rifles'), r.name, `<button class="r" data-act="edit-rifle" data-id="${rid}">Edit</button>`);
+  bar(back('#/', 'Rifles', true), r.name, `<button class="r" data-act="edit-rifle" data-id="${rid}">Edit</button>`);
   const gs = S.groups.filter((g) => g.rifleId === rid);
   const cs = combos(gs);
   const bd = bestDist();
@@ -374,7 +390,7 @@ function viewAll(rid) {
   const r = byId('rifles', rid);
   if (!r) return viewHome();
   if (F.rid !== rid) F = { rid, powder: '', bullet: '', primer: '', charge: '', jump: '', distance: '' };
-  bar(back('#/rifle/' + rid, 'Back'), 'All Data', '', rid);
+  bar(back('#/rifle/' + rid, 'Rifle', true), 'All Data', '', rid);
   const all = S.groups.filter((g) => g.rifleId === rid);
   const gs = all.filter((g) => (!F.powder || g.powderId === F.powder) && (!F.bullet || g.bulletId === F.bullet) && (!F.primer || g.primerId === F.primer) &&
     (!F.charge || String(Number(g.charge)) === F.charge) && (!F.jump || String(Number(g.jump)) === F.jump) && (!F.distance || String(Number(g.distance)) === F.distance));
@@ -417,7 +433,7 @@ const sessMeta = (se) => `${fin(se.fouling) ? se.fouling : 0} fouling${fin(se.te
 function viewSessions(rid) {
   const r = byId('rifles', rid);
   if (!r) return viewHome();
-  bar(back('#/rifle/' + rid, 'Back'), 'Sessions', '', rid);
+  bar(back('#/rifle/' + rid, 'Rifle', true), 'Sessions', '', rid);
   const list = sessionsOf(rid).sort(newest).map((se) => {
     const gs = groupsOf(se.id);
     return `<a class="card" href="#/session/${se.id}"><div class="row sb"><b>${esc(sessionLabel(se))}</b><span class="mono">${gs.length} grp · ${gs.reduce((a, g) => a + g.shots.length, 0)} shots</span></div><div class="muted">${sessMeta(se)}</div></a>`;
@@ -449,7 +465,7 @@ function viewCombo(rid, key) {
   const gs = S.groups.filter((g) => g.rifleId === rid && ckey(g) === key)
     .sort((a, b) => (sessOf(b) ? sessOf(b).date : '').localeCompare(sessOf(a) ? sessOf(a).date : '') || b.ts - a.ts);
   if (!r || !gs.length) return viewHome();
-  bar(back('#/rifle/' + rid, 'Back'), 'Load', '', rid);
+  bar(back('#/rifle/' + rid, 'Rifle'), 'Load', '', rid);
   const c = combos(gs)[0];
   const excl = gs.filter((g) => g.include === false).length;
   main(`<div><h1 style="font-size:22px">${esc(comboLabel(gs[0]))}</h1></div>
@@ -468,7 +484,7 @@ let showThin = false; // Best page: off by default, so only ranked loads show
 function viewBest(rid) {
   const r = byId('rifles', rid);
   if (!r) return viewHome();
-  bar(back('#/rifle/' + rid, 'Back'), 'Best by Distance', '', rid);
+  bar(back('#/rifle/' + rid, 'Rifle', true), 'Best by Distance', '', rid);
   const cs = combos(S.groups.filter((g) => g.rifleId === rid));
   const dists = [...new Set(cs.map((c) => Number(c.distance)))].sort((a, b) => a - b);
   const sections = dists.map((d) => {
@@ -571,7 +587,7 @@ function viewLoad(rid) {
   const r = byId('rifles', rid);
   if (!r) return viewHome();
   if (LA.rid !== rid) LA = { rid, bullet: '', powder: '', powderB: '', sort: 'mr', thin: false, ladderThin: false, compare: false };
-  bar(back('#/rifle/' + rid, 'Back'), 'Load Analysis', '', rid);
+  bar(back('#/rifle/' + rid, 'Rifle', true), 'Load Analysis', '', rid);
   const all = S.groups.filter((g) => g.rifleId === rid);
   const usedIds = (k) => new Set(all.map((g) => g[k]));
   const bullets = S.bullets.filter((b) => usedIds('bulletId').has(b.id)), powders = S.powders.filter((p) => usedIds('powderId').has(p.id));
@@ -825,7 +841,7 @@ function sessionForm(rid, se) {
 }
 
 function viewSettings() {
-  bar(back('#/', 'Rifles'), 'Settings');
+  bar(back('#/', 'Rifles', true), 'Settings');
   const lib = (title, s, sub) => `<h2 class="row sb" style="align-items:center">${title}<button class="btn sm" data-act="lib-new" data-s="${s}">+ Add</button></h2>
     ${S[s].slice().sort((a, b) => a.name.localeCompare(b.name)).map((x) => `<div class="item" role="button" tabindex="0" data-act="lib-edit" data-s="${s}" data-id="${x.id}"><div>${esc(x.name)}${sub(x) ? `<small>${esc(sub(x))}</small>` : ''}</div><span class="muted">Edit</span></div>`).join('') || '<div class="muted">None yet.</div>'}`;
   main(`<h1>Components</h1>
@@ -944,6 +960,8 @@ function initUpdates() {
 window.addEventListener('hashchange', () => { trackNav(); render(); });
 
 document.addEventListener('click', (e) => {
+  const up = e.target.closest('a[data-up]');
+  if (up) { e.preventDefault(); goUp(up.getAttribute('href')); return; }
   const bk = e.target.closest('a[data-back]');
   if (bk && navIdx > 0) { e.preventDefault(); history.back(); return; }
   const t = e.target.closest('[data-act]');
