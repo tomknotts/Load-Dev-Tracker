@@ -127,3 +127,26 @@ details.unproven summary{min-height:44px;display:flex;align-items:center;cursor:
 
 /* group the user came from, highlighted in the session list */
 .hl{border:2px solid var(--accent-text);box-shadow:0 0 0 3px var(--accent-soft)}
+
+/* hamburger menu (main page) */
+.menu{position:fixed;right:8px;top:calc(env(safe-area-inset-top) + 58px);z-index:10;min-width:210px;background:var(--card);border:1px solid var(--line2);border-radius:12px;padding:6px;box-shadow:0 8px 24px rgba(0,0,0,.28)}
+.menu[hidden]{display:none}
+.menu a{display:flex;align-items:center;min-height:48px;padding:0 14px;border-radius:8px;font-weight:600;font-size:17px}
+.menu a:hover,.menu a:focus-visible{background:var(--chip);outline:none}
+.menu a.last{margin-top:6px;border-top:1px solid var(--line);border-radius:0 0 8px 8px}
+
+/* crimp test */
+:root{--ok-bg:#dcefd9;--ok-line:#2e7d32;--bad-bg:#f8d9d5;--bad-line:#b3261e;--base-bg:#dbe7f6;--base-line:#3b6fb0}
+:root[data-theme="dark"]{--ok-bg:#1f3a20;--ok-line:#6fbf73;--bad-bg:#4a1f1b;--bad-line:#f08a7c;--base-bg:#1d2f47;--base-line:#7fb0ea}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--ok-bg:#1f3a20;--ok-line:#6fbf73;--bad-bg:#4a1f1b;--bad-line:#f08a7c;--base-bg:#1d2f47;--base-line:#7fb0ea}}
+.crrow{display:grid;grid-template-columns:76px 1fr 84px;gap:10px;align-items:center}
+.crrow small,.crd small{display:block;font-size:11px;color:var(--mute);font-family:system-ui,sans-serif;font-weight:600}
+.crd{font-family:var(--mono);text-align:right}
+.crd b{font-size:15px}
+.in.ok{background:var(--ok-bg);border-color:var(--ok-line)}
+.in.bad{background:var(--bad-bg);border-color:var(--bad-line)}
+.crm{display:grid;gap:4px;align-items:center}
+.crcell{aspect-ratio:1;min-height:0;width:100%;border-radius:6px;border:1.5px solid var(--line2);background:var(--field);padding:0;cursor:pointer}
+.crcell.ok{background:var(--ok-bg);border-color:var(--ok-line)}
+.crcell.bad{background:var(--bad-bg);border-color:var(--bad-line)}
+.crcell.base{background:var(--base-bg);border-color:var(--base-line)}

@@ -312,14 +312,13 @@ function formDialog(title, fields, vals, onSave, onDelete) {
 
 /* ---------- views ---------- */
 function viewHome() {
-  bar('', 'Load Dev Tracker', '<a class="r" href="#/settings">Settings</a>');
+  bar('', 'Load Dev Tracker', '<button class="r" data-act="menu" aria-label="Menu" aria-haspopup="true" aria-expanded="false" aria-controls="menu"><svg width="26" height="26" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M3 12h18M3 18h18" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg></button>');
   const rows = S.rifles.slice().sort((a, b) => a.name.localeCompare(b.name)).map((r) => {
     const t = rifleTotals(r.id);
     return `<a class="item" href="#/rifle/${r.id}"><div><b style="font-size:20px">${esc(r.name)}</b><small>${esc(calName(r.caliberId))}${r.barrel ? ' · ' + r.barrel + ' in' : ''}</small></div><div style="text-align:right"><div class="mono v">${t.barrel}</div><small>barrel rounds</small></div></a>`;
   }).join('');
   main(`<h1>Rifles</h1>${rows || '<div class="card muted">No rifles yet. Add one to start logging.</div>'}
     <button class="btn pri" data-act="new-rifle">+ Add New Rifle</button>
-    <a class="btn" href="#/settings">Settings · Components</a>
     <div class="muted">Stored on this device only. Use Export in Settings to back up.</div>`);
 }
 
@@ -630,6 +629,96 @@ function viewLoad(rid) {
     ${sections || '<div class="card muted">Not enough data yet.</div>'}`);
 }
 
+/* ---------- Tools ---------- */
+function viewTools() {
+  bar(back('#/', 'Rifles', true), 'Tools');
+  main(`<h1>Tools</h1>
+    <a class="card" href="#/tools/crimp"><div class="row sb"><b>Crimp test</b><span aria-hidden="true">→</span></div>
+      <div class="muted">Check whether your crimp holds COAL in the magazine tube. A decreasing ladder: each pass measures the rounds still in the tube.</div></a>`);
+}
+
+/* Crimp test. Pass p holds rounds p..n (pass 1 = all rounds, the baseline). From pass 2 on, each COAL is compared with its OWN pass 1 value:
+   within +/- tolerance = green, outside = red. One working test is kept on this device (meta store, not in backups) until you clear it. */
+let CR = null, crTimer = null;
+const crKey = (p, r) => p + '-' + r;
+function crLoad() {
+  if (!CR) CR = { id: 'crimp', n: 8, tol: 0.005, pass: 1, vals: {}, ...(S.meta.find((m) => m.id === 'crimp') || {}) };
+  return CR;
+}
+function crSave() { clearTimeout(crTimer); crTimer = setTimeout(() => { rp(store('meta', 'readwrite').put(CR)).catch(() => {}); }, 250); }
+function crCalc() {
+  const { n, tol } = CR, cells = {};
+  let entered = 0, ok = 0, bad = 0, worst = 0, worstAt = '';
+  for (let p = 1; p <= n; p++) for (let r = p; r <= n; r++) {
+    const v = num(CR.vals[crKey(p, r)]), base = num(CR.vals[crKey(1, r)]);
+    let st = 'none', d = null;
+    if (v !== null) {
+      entered++;
+      if (p === 1) st = 'base';
+      else if (base === null) st = 'nobase';
+      else {
+        d = v - base;
+        st = Math.abs(d) <= tol + 1e-9 ? 'ok' : 'bad'; // exactly on the limit counts as within
+        if (st === 'ok') ok++; else bad++;
+        if (Math.abs(d) > worst) { worst = Math.abs(d); worstAt = `round ${r}, pass ${p}`; }
+      }
+    }
+    cells[crKey(p, r)] = { st, d };
+  }
+  return { cells, entered, ok, bad, worst, worstAt, total: n * (n + 1) / 2 };
+}
+const crDelta = (c) => (c.st === 'ok' || c.st === 'bad' ? `<b>${sfmt(c.d, 3)}</b><small>${c.st === 'ok' ? 'OK' : 'OUT'}</small>` : c.st === 'nobase' ? '<small>enter pass 1</small>' : '');
+function crSummary(k) {
+  const compared = k.ok + k.bad;
+  const verdict = !compared ? '<span class="tag">No comparisons yet</span>' : k.bad ? `<span class="tag a">${k.bad} outside tolerance</span>` : '<span class="tag g">All within tolerance</span>';
+  return `${verdict}<div class="muted" style="margin-top:6px">${k.entered} of ${k.total} entered · ${compared} compared to pass 1${compared ? ` · worst change ${fmt(k.worst, 3)}" (${k.worstAt})` : ''}</div>`;
+}
+function crMatrix(k) {
+  const n = CR.n, tag = { ok: 'ok', bad: 'bad', base: 'base', nobase: 'none', none: 'none' };
+  let h = `<div class="crm" style="grid-template-columns:34px repeat(${n},minmax(0,1fr))"><span></span>${Array.from({ length: n }, (_, i) => `<span class="lbl" style="text-align:center">${i + 1}</span>`).join('')}`;
+  for (let p = 1; p <= n; p++) {
+    h += `<span class="lbl">P${p}</span>`;
+    for (let r = 1; r <= n; r++) h += r < p ? '<span></span>' : `<button type="button" class="crcell ${tag[k.cells[crKey(p, r)].st]}" data-act="cr-pass" data-p="${p}" aria-label="Pass ${p}, round ${r}: ${k.cells[crKey(p, r)].st === 'ok' ? 'within tolerance' : k.cells[crKey(p, r)].st === 'bad' ? 'outside tolerance' : 'no result'}"></button>`;
+  }
+  return h + '</div><div class="muted">Rows = passes, columns = rounds. Green within tolerance, red outside, blue = pass 1 baseline. Tap a row to open that pass.</div>';
+}
+function crRefresh() { // patch colors and text in place so typing never loses focus
+  const k = crCalc();
+  $$('.crrow').forEach((row) => {
+    const c = k.cells[crKey(row.dataset.p, row.dataset.r)];
+    $('input', row).className = 'in m cr-in ' + (c.st === 'ok' || c.st === 'bad' ? c.st : '');
+    $('.crd', row).innerHTML = crDelta(c);
+  });
+  const s = $('#cr-sum'); if (s) s.innerHTML = crSummary(k);
+  const m = $('#cr-mat'); if (m) m.innerHTML = crMatrix(k);
+}
+function viewCrimp() {
+  crLoad();
+  bar(back('#/tools', 'Tools', true), 'Crimp test');
+  const k = crCalc(), n = CR.n, p = Math.min(CR.pass, n);
+  const rows = [];
+  for (let r = p; r <= n; r++) {
+    const c = k.cells[crKey(p, r)], base = CR.vals[crKey(1, r)];
+    rows.push(`<div class="crrow" data-p="${p}" data-r="${r}"><div><b>Rnd ${r}</b>${p > 1 ? `<small>Pass 1: ${base ? esc(base) : '—'}</small>` : ''}</div>
+      <input class="in m cr-in ${c.st === 'ok' || c.st === 'bad' ? c.st : ''}" inputmode="decimal" autocomplete="off" value="${esc(CR.vals[crKey(p, r)] ?? '')}" aria-label="Pass ${p}, round ${r} COAL (in)" placeholder="COAL">
+      <div class="crd">${crDelta(c)}</div></div>`);
+  }
+  main(`<h1>Crimp test</h1>
+    <div class="muted">Pass 1: measure COAL of all ${n} rounds. Each later pass: the rounds still in the tube (pass 2 = rounds 2–${n}, and so on down to round ${n}). Each COAL is checked against its own pass 1 value.</div>
+    <div class="grid2">
+      <div class="f"><span class="lbl">Rounds</span><div class="row"><button class="btn sm" data-act="cr-n" data-v="-1" aria-label="Fewer rounds">−</button><b class="mono v" style="min-width:36px;text-align:center">${n}</b><button class="btn sm" data-act="cr-n" data-v="1" aria-label="More rounds">+</button></div></div>
+      <div class="f"><label class="lbl" for="cr-tol">Tolerance ± (in)</label><input class="in m" id="cr-tol" inputmode="decimal" value="${CR.tol}"></div>
+    </div>
+    <div class="card" id="cr-sum">${crSummary(k)}</div>
+    <div class="row" style="flex-wrap:wrap;gap:6px">${Array.from({ length: n }, (_, i) => `<button class="btn sm ${i + 1 === p ? 'pri' : ''}" style="min-width:44px" data-act="cr-pass" data-p="${i + 1}" aria-pressed="${i + 1 === p}">${i + 1}</button>`).join('')}</div>
+    <h2>Pass ${p} · ${p === 1 ? `all ${n} rounds (baseline)` : `rounds ${p}–${n}`}</h2>
+    <div class="stack">${rows.join('')}</div>
+    ${p < n ? `<button class="btn dark" data-act="cr-pass" data-p="${p + 1}">Next pass →</button>` : ''}
+    <h2>Overview</h2><div id="cr-mat">${crMatrix(k)}</div>
+    <button class="btn danger" data-act="cr-clear">Clear all values</button>
+    <div class="muted">Kept on this device until you clear it. Not included in backups.</div>`);
+}
+
 /* Calibers are a library. A rifle and a bullet are linked by sharing the same caliber; the group form's bullet list follows the rifle. */
 const calNorm = (s) => String(s || '').toLowerCase().replace(/^\./, '').replace(/\s+/g, ' ').trim();
 const calMatch = (a, b) => { a = calNorm(a); b = calNorm(b); return !!a && !!b && (a.startsWith(b) || b.startsWith(a)); }; // only used to migrate old free-text values
@@ -898,6 +987,7 @@ function libForm(s, x) {
 
 /* ---------- router & events ---------- */
 function render() {
+  const mn = $('#menu'); if (mn) mn.hidden = true; // any navigation closes the hamburger menu
   const [path, qs] = (location.hash.slice(1) || '/').split('?');
   const p = path.split('/').filter(Boolean);
   const q = new URLSearchParams(qs || '');
@@ -905,6 +995,7 @@ function render() {
     if (!p.length) viewHome();
     else if (p[0] === 'rifle') viewRifle(p[1]);
     else if (p[0] === 'all') viewAll(p[1]);
+    else if (p[0] === 'tools') { if (p[1] === 'crimp') viewCrimp(); else viewTools(); }
     else if (p[0] === 'best') viewBest(p[1]);
     else if (p[0] === 'load') viewLoad(p[1]);
     else if (p[0] === 'sessions') viewSessions(p[1]);
@@ -978,6 +1069,14 @@ document.addEventListener('click', (e) => {
   else if (a === 'accent') { try { localStorage.setItem('accent', t.dataset.v); } catch (err) { /* private mode: applies for this visit only */ } applyTheme(themePref(), t.dataset.v); viewAllKeepScroll(); }
   else if (a === 'go') { if (!e.target.closest('a')) location.hash = t.dataset.href; }
   else if (a === 'la-sort') { LA.sort = t.dataset.v; viewAllKeepScroll(); }
+  else if (a === 'menu') { const m = $('#menu'); m.hidden = !m.hidden; t.setAttribute('aria-expanded', String(!m.hidden)); }
+  else if (a === 'cr-pass') { CR.pass = Number(t.dataset.p); crSave(); viewAllKeepScroll(); window.scrollTo(0, 0); }
+  else if (a === 'cr-n') {
+    CR.n = Math.max(2, Math.min(20, CR.n + Number(t.dataset.v)));
+    for (const key of Object.keys(CR.vals)) { const [pp, rr] = key.split('-').map(Number); if (pp > CR.n || rr > CR.n) delete CR.vals[key]; }
+    CR.pass = Math.min(CR.pass, CR.n); crSave(); viewAllKeepScroll();
+  }
+  else if (a === 'cr-clear') { if (confirm('Clear all entered COAL values? Rounds and tolerance stay.')) { CR.vals = {}; CR.pass = 1; crSave(); render(); } }
   else if (a === 'new-session') sessionForm(id, null);
   else if (a === 'edit-session') { const se = byId('sessions', id); if (se) sessionForm(se.rifleId, se); }
   else if (a === 'apply-update') { if (updateWorker) updateWorker.postMessage({ type: 'SKIP_WAITING' }); }
@@ -991,6 +1090,28 @@ document.addEventListener('click', (e) => {
     const v = inp.value.trim();
     inp.value = v.startsWith('-') ? v.slice(1) : '-' + v;
     inp.focus(); preview();
+  }
+});
+document.addEventListener('input', (e) => {
+  if (e.target.classList && e.target.classList.contains('cr-in')) {
+    const row = e.target.closest('.crrow');
+    CR.vals[crKey(row.dataset.p, row.dataset.r)] = e.target.value.trim();
+    crSave(); crRefresh();
+  } else if (e.target.id === 'cr-tol') {
+    const v = num(e.target.value); CR.tol = v !== null && v >= 0 ? v : 0;
+    crSave(); crRefresh();
+  }
+});
+document.addEventListener('click', (e) => { // tap outside the hamburger menu closes it
+  const m = $('#menu');
+  if (m && !m.hidden && !e.target.closest('#menu') && !e.target.closest('[data-act=menu]')) { m.hidden = true; const b = $('[data-act=menu]'); if (b) b.setAttribute('aria-expanded', 'false'); }
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') { const m = $('#menu'); if (m) m.hidden = true; }
+  if (e.key === 'Enter' && e.target.classList && e.target.classList.contains('cr-in')) { // Enter = next round's box
+    e.preventDefault();
+    const all = $$('.cr-in'), i = all.indexOf(e.target);
+    (all[i + 1] || e.target).focus();
   }
 });
 document.addEventListener('keydown', (e) => { if ((e.key === 'Enter' || e.key === ' ') && e.target.matches('.item[data-act]')) { e.preventDefault(); e.target.click(); } });
