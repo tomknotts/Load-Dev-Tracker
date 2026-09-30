@@ -446,7 +446,6 @@ function viewSession(sid, hlId) {
   if (!se) return viewHome();
   const rid = se.rifleId, gs = groupsOf(sid);
   const shots = gs.reduce((a, g) => a + g.shots.length, 0);
-  const cs = combos(gs);
   bar(back('#/sessions/' + rid, 'Sessions'), 'Session · ' + se.date, `<button class="r" data-act="edit-session" data-id="${sid}">Edit</button>`, rid);
   main(`<div><h1 style="font-size:24px">${esc(sessionLabel(se))}</h1><div class="muted">${sessMeta(se)}</div></div>
     <div class="grid3"><div class="card"><div class="lbl">Groups</div><span class="mono v">${gs.length}</span></div>
@@ -455,8 +454,7 @@ function viewSession(sid, hlId) {
     <div class="muted" style="margin-top:-6px">Since clean = rounds since clean at the end of this session (fouling shots + every shot fired).</div>
     <a class="btn dark" href="#/add/${sid}">+ Add Group to this session</a>
     <h2>Groups · in the order fired</h2>
-    ${gs.length ? gs.map((g) => groupCard(g, false, g.id === hlId)).join('') : '<div class="card muted">No groups in this session yet.</div>'}
-    ${cs.length ? `<h2>Loads in this session · pooled across all sessions</h2>${cs.map((c) => comboRow(c, false)).join('')}` : ''}`);
+    ${gs.length ? gs.map((g) => groupCard(g, false, g.id === hlId)).join('') : '<div class="card muted">No groups in this session yet.</div>'}`);
 }
 
 function viewCombo(rid, key) {
