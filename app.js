@@ -117,7 +117,7 @@ const byId = (s, id) => S[s].find((x) => x.id === id);
 async function exportData() {
   const data = {};
   for (const s of STORES) data[s] = S[s];
-  const blob = new Blob([JSON.stringify({ app: '308-load-dev-tracker', version: 2, exported: new Date().toISOString(), data }, null, 2)], { type: 'application/json' });
+  const blob = new Blob([JSON.stringify({ app: '308-load-dev-tracker', version: 3, exported: new Date().toISOString(), data }, null, 2)], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = `load-dev-backup-${today()}.json`;
@@ -177,12 +177,17 @@ function gstats(g) {
 const moa = (inches, yd) => (fin(inches) && fin(yd) && yd > 0 ? inches / (1.047 * yd / 100) : null);
 const bestDist = () => (fin(S.cfg.bestDist) && S.cfg.bestDist > 0 ? S.cfg.bestDist : 100);
 // A combo = Bullet + Powder + Charge + Primer + Jump + Distance. Distance is part of it because the best load at 100 yd may not be best at 300.
-const ckey = (g) => [g.bulletId, g.powderId, Number(g.charge), g.primerId, Number(g.jump), Number(g.distance)].join('|');
+// Firearm type: 'rifle' or 'pistol'. A record with no type is a rifle (nothing is rewritten, the default is applied when reading).
+const isPistol = (rid) => { const r = byId('rifles', rid); return !!r && r.type === 'pistol'; };
+// Rifle key uses Jump; pistol key uses COAL instead (no jump on a pistol). Everything else, including this pooling function, is shared.
+const ckey = (g) => (isPistol(g.rifleId)
+  ? [g.bulletId, g.powderId, Number(g.charge), g.primerId, Number(g.coal), Number(g.distance)]
+  : [g.bulletId, g.powderId, Number(g.charge), g.primerId, Number(g.jump), Number(g.distance)]).join('|');
 function combos(groups) {
   const m = new Map();
   for (const g of groups) {
     if (g.include === false) continue;
-    if (!m.has(ckey(g))) m.set(ckey(g), { key: ckey(g), bulletId: g.bulletId, powderId: g.powderId, charge: g.charge, primerId: g.primerId, jump: g.jump, distance: g.distance, groups: [] });
+    if (!m.has(ckey(g))) m.set(ckey(g), { key: ckey(g), bulletId: g.bulletId, powderId: g.powderId, charge: g.charge, primerId: g.primerId, jump: g.jump, coal: g.coal, pistol: isPistol(g.rifleId), distance: g.distance, groups: [] });
     m.get(ckey(g)).groups.push(g);
   }
   return [...m.values()].map((c) => {
@@ -199,7 +204,10 @@ function combos(groups) {
       nGroups: c.groups.length,
       nShots: c.groups.reduce((a, g) => a + g.shots.length, 0),
       mr, es, mrMoa: moa(mr, c.distance), esMoa: moa(es, c.distance),
-      vel: vn ? vs.reduce((a, s) => a + s.vavg * s.vn, 0) / vn : null
+      vel: vn ? vs.reduce((a, s) => a + s.vavg * s.vn, 0) / vn : null,
+      // pistol only: manually entered group sizes, simple average (not a precision metric) and how many groups had one
+      gsN: c.groups.filter((g) => fin(g.groupSize)).length,
+      gsAvg: c.groups.some((g) => fin(g.groupSize)) ? c.groups.filter((g) => fin(g.groupSize)).reduce((a, g) => a + g.groupSize, 0) / c.groups.filter((g) => fin(g.groupSize)).length : null
     };
   }).sort((a, b) => (a.distance - b.distance) || (a.mr ?? 9e9) - (b.mr ?? 9e9)); // by distance, then best (smallest) mean radius
 }
@@ -233,7 +241,8 @@ function rifleTotals(rid) {
 /* ---------- labels ---------- */
 const bl = (id) => { const b = byId('bullets', id); return b ? b.name + (fin(b.weight) ? ' ' + b.weight + ' gn' : '') : '?'; };
 const nm = (s, id) => (byId(s, id) || {}).name || '?';
-const comboLabel = (c) => `${bl(c.bulletId)} · ${nm('powders', c.powderId)} ${c.charge} gn · ${nm('primers', c.primerId)} · ${c.jump} thou · ${c.distance} yd`;
+// takes a pooled combo (has .pistol) or a single group (has .rifleId): a pistol shows COAL where a rifle shows jump
+const comboLabel = (c) => `${bl(c.bulletId)} · ${nm('powders', c.powderId)} ${c.charge} gn · ${nm('primers', c.primerId)} · ${(c.pistol ?? isPistol(c.rifleId)) ? 'COAL ' + c.coal + '"' : c.jump + ' thou'} · ${c.distance} yd`;
 
 /* ---------- UI plumbing ---------- */
 // With rid, the middle of the bar shows the rifle name (tap = that rifle's main page) and the page name underneath.
@@ -286,7 +295,7 @@ function formDialog(title, fields, vals, onSave, onDelete) {
   d.innerHTML = `<form method="dialog"><h1 style="font-size:22px">${esc(title)}</h1>
     ${fields.map((f) => `<div class="f"><label class="lbl" for="d-${f.k}">${esc(f.label)}</label>${
       f.type === 'select'
-        ? `<select class="in" id="d-${f.k}">${f.opts.map((o) => `<option value="${esc(o[0])}"${o[0] === vals[f.k] ? ' selected' : ''}>${esc(o[1])}</option>`).join('')}</select>`
+        ? `<select class="in" id="d-${f.k}"${f.disabled ? ' disabled' : ''}>${f.opts.map((o) => `<option value="${esc(o[0])}"${o[0] === vals[f.k] ? ' selected' : ''}>${esc(o[1])}</option>`).join('')}</select>`
         : `<input class="in ${f.type === 'num' ? 'm' : ''}" id="d-${f.k}" type="text" ${f.type === 'num' ? 'inputmode="decimal"' : ''} ${f.list ? `list="dl-${f.k}"` : ''} value="${esc(vals[f.k] ?? '')}" autocomplete="off">${f.list ? `<datalist id="dl-${f.k}">${f.list.map((o) => `<option value="${esc(o)}">`).join('')}</datalist>` : ''}`}</div>`).join('')}
     <div class="grid2"><button class="btn pri" value="ok">Save</button><button class="btn" value="cancel" type="button" id="d-x">Cancel</button></div>
     ${onDelete ? '<button class="btn danger sm" type="button" id="d-del">Delete</button>' : ''}</form>`;
@@ -315,21 +324,24 @@ function viewHome() {
   bar('', 'Load Dev Tracker', '<button class="r" data-act="menu" aria-label="Menu" aria-haspopup="true" aria-expanded="false" aria-controls="menu"><svg width="26" height="26" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M3 12h18M3 18h18" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg></button>');
   const rows = S.rifles.slice().sort((a, b) => a.name.localeCompare(b.name)).map((r) => {
     const t = rifleTotals(r.id);
-    return `<a class="item" href="#/rifle/${r.id}"><div><b style="font-size:20px">${esc(r.name)}</b><small>${esc(calName(r.caliberId))}${r.barrel ? ' · ' + r.barrel + ' in' : ''}</small></div><div style="text-align:right"><div class="mono v">${t.barrel}</div><small>barrel rounds</small></div></a>`;
+    return `<a class="item" href="#/rifle/${r.id}"><div><b style="font-size:20px">${esc(r.name)}</b><small>${r.type === 'pistol' ? 'Pistol · ' : ''}${esc(calName(r.caliberId))}${r.barrel ? ' · ' + r.barrel + ' in' : ''}</small></div><div style="text-align:right"><div class="mono v">${t.barrel}</div><small>barrel rounds</small></div></a>`;
   }).join('');
-  main(`<h1>Rifles</h1>${rows || '<div class="card muted">No rifles yet. Add one to start logging.</div>'}
-    <button class="btn pri" data-act="new-rifle">+ Add New Rifle</button>
+  main(`<h1>Firearms</h1>${rows || '<div class="card muted">No firearms yet. Add one to start logging.</div>'}
+    <button class="btn pri" data-act="new-rifle">+ Add New Firearm</button>
     <div class="muted">Stored on this device only. Use Export in Settings to back up.</div>`);
 }
 
 function rifleForm(r) {
-  formDialog(r ? 'Edit rifle' : 'New rifle', [
+  const hasGroups = !!r && S.groups.some((g) => g.rifleId === r.id);
+  formDialog(r ? 'Edit firearm' : 'New firearm', [
     { k: 'name', label: 'Name / label', req: true },
+    // required; can only be changed while the firearm has no logged groups (a legacy record with no type is a rifle)
+    { k: 'type', label: hasGroups ? 'Type (locked: this firearm has logged groups)' : 'Type', type: 'select', opts: [['rifle', 'Rifle'], ['pistol', 'Pistol']], disabled: hasGroups },
     { k: 'caliberId', label: 'Caliber (add calibers in Settings)', type: 'select', opts: calOpts() },
     { k: 'barrel', label: 'Barrel length (in)', type: 'num' },
     { k: 'startRounds', label: 'Rounds already through barrel', type: 'num' }
-  ], r || {}, async (v) => {
-    await put('rifles', { ...(r || { id: uid() }), name: v.name, caliberId: v.caliberId, barrel: v.barrel, startRounds: v.startRounds ?? 0 });
+  ], r ? { ...r, type: r.type === 'pistol' ? 'pistol' : 'rifle' } : { type: 'rifle' }, async (v) => {
+    await put('rifles', { ...(r || { id: uid() }), name: v.name, type: hasGroups ? (r.type === 'pistol' ? 'pistol' : 'rifle') : (v.type === 'pistol' ? 'pistol' : 'rifle'), caliberId: v.caliberId, barrel: v.barrel, startRounds: v.startRounds ?? 0 });
   }, r ? async () => {
     if (!confirm(`Delete "${r.name}" and ALL its groups? This cannot be undone.`)) return false;
     for (const g of S.groups.filter((g2) => g2.rifleId === r.id)) await del('groups', g.id);
@@ -342,14 +354,33 @@ function rifleForm(r) {
 }
 
 const comboHref = (c) => `#/combo/${c.groups[0].rifleId}/${encodeURIComponent(c.key)}`;
+// Pistol groups have no X/Y, so their card shows the manual group size (and its MOA) plus velocity stats instead of mean radius / ES.
+function groupCardPistol(g, s, showSess, hl) {
+  return `<a class="card ${g.include === false ? 'excl' : ''}${hl ? ' hl' : ''}" href="#/group/${g.id}">
+    <div class="row sb"><b>${esc(nm('powders', g.powderId))} ${g.charge} gn</b><span class="row" style="gap:6px">${hl ? '<span class="tag g">from here</span>' : ''}${g.include === false ? '<span class="tag a">Excluded</span>' : ''}${g.reference ? '<span class="tag g">Ref</span>' : ''}</span></div>
+    <div class="muted">${showSess && sessOf(g) ? esc(sessionLabel(sessOf(g))) + ' · ' : ''}${esc(bl(g.bulletId))} · ${esc(nm('primers', g.primerId))} · COAL ${fin(g.coal) ? g.coal + '"' : '—'} · ${fin(g.distance) ? g.distance + ' yd' : 'no distance'} · RSC ${roundsSinceClean(g) ?? '—'}</div>
+    <div style="display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:6px"><div><div class="lbl">Size</div><span class="mono v">${fmt(g.groupSize, 2)}</span></div><div><div class="lbl">MOA</div><span class="mono v">${fmt(moa(g.groupSize, g.distance), 2)}</span></div><div><div class="lbl">Vel</div><span class="mono v">${fin(s.vavg) ? Math.round(s.vavg) : '—'}</span></div><div><div class="lbl">SD</div><span class="mono v">${fmt(s.vsd, 1)}</span></div><div><div class="lbl">Shots</div><span class="mono v">${s.total}</span></div></div></a>`;
+}
 function groupCard(g, showSess, hl) {
   const s = gstats(g);
+  if (isPistol(g.rifleId)) return groupCardPistol(g, s, showSess, hl);
   return `<a class="card ${g.include === false ? 'excl' : ''}${hl ? ' hl' : ''}" href="#/group/${g.id}">
     <div class="row sb"><b>${esc(nm('powders', g.powderId))} ${g.charge} gn</b><span class="row" style="gap:6px">${hl ? '<span class="tag g">from here</span>' : ''}${g.include === false ? '<span class="tag a">Excluded</span>' : ''}${g.reference ? '<span class="tag g">Ref</span>' : ''}</span></div>
     <div class="muted">${showSess && sessOf(g) ? esc(sessionLabel(sessOf(g))) + ' · ' : ''}${esc(bl(g.bulletId))} · ${esc(nm('primers', g.primerId))} · ${g.jump} thou · ${fin(g.distance) ? g.distance + ' yd' : 'no distance'} · RSC ${roundsSinceClean(g) ?? '—'}</div>
     <div class="grid4"><div><div class="lbl">MR</div><span class="mono v">${fmt(s.mr)}</span></div><div><div class="lbl">MR MOA</div><span class="mono v">${fmt(moa(s.mr, g.distance), 2)}</span></div><div><div class="lbl">ES</div><span class="mono v">${fmt(s.es)}</span></div><div><div class="lbl">Shots</div><span class="mono v">${s.total}</span></div></div></a>`;
 }
+// Pistol load card: pooled velocity SD is the headline; group size is a simple average of the manual sizes (not a precision metric).
+function comboRowPistol(c, best, rank) {
+  const vp = velPool(c);
+  return `<a class="card" href="${comboHref(c)}" ${best ? 'style="border:2px solid var(--accent-text)"' : ''}>
+    <div class="row sb"><b>${esc(comboLabel(c))}</b>${rank ? `<span class="tag ${rank === 1 ? 'g' : ''}">${rank === 1 ? '#1 best' : '#' + rank}</span>` : ''}</div>
+    <div class="grid4"><div><div class="lbl">Grp</div><span class="mono v">${c.nGroups}</span></div><div><div class="lbl">Shots</div><span class="mono v">${c.nShots}</span></div>
+    <div><div class="lbl">Vel SD</div><span class="mono v">${fmt(vp.sd, 1)}</span></div><div><div class="lbl">Vel</div><span class="mono v">${fin(c.vel) ? Math.round(c.vel) : '—'}</span></div></div>
+    <div class="muted">ES ${fmt(vp.es, 0)} fps (n=${vp.n} readings) · group size avg ${fmt(c.gsAvg, 2)}" / ${fmt(moa(c.gsAvg, c.distance), 2)} MOA (${c.gsN} of ${c.nGroups} groups)</div>
+    ${c.nGroups >= 2 ? '' : '<div class="warn">Not enough data yet — needs 2+ groups</div>'}<div class="muted">Tap to see its groups →</div></a>`;
+}
 function comboRow(c, best, rank) {
+  if (c.pistol) return comboRowPistol(c, best, rank);
   const ranked = c.nGroups >= 2;
   return `<a class="card" href="${comboHref(c)}" ${best ? 'style="border:2px solid var(--accent-text)"' : ''}>
     <div class="row sb"><b>${esc(comboLabel(c))}</b>${rank ? `<span class="tag ${rank === 1 ? 'g' : ''}">${rank === 1 ? '#1 best' : '#' + rank}</span>` : ''}</div>
@@ -362,15 +393,24 @@ function comboRow(c, best, rank) {
 function viewRifle(rid) {
   const r = byId('rifles', rid);
   if (!r) return viewHome();
-  bar(back('#/', 'Rifles', true), r.name, `<button class="r" data-act="edit-rifle" data-id="${rid}">Edit</button>`);
+  bar(back('#/', 'Firearms', true), r.name, `<button class="r" data-act="edit-rifle" data-id="${rid}">Edit</button>`);
   const gs = S.groups.filter((g) => g.rifleId === rid);
   const cs = combos(gs);
   const bd = bestDist();
   const best = cs.find((c) => Number(c.distance) === bd && c.nGroups >= 2 && c.mr !== null); // main screen ranks one distance (default 100 yd); other distances live on the Best page
   const t = rifleTotals(rid);
   const latest = latestSession(rid);
-  main(`<div class="muted">${esc(calName(r.caliberId))}${r.barrel ? ' · ' + r.barrel + ' in barrel' : ''}</div>
-    ${best ? `<a class="hero" href="${comboHref(best)}"><div class="lbl">Current best load · ${bd} yd</div><div style="font-size:19px;font-weight:600">${esc(bl(best.bulletId))} · ${esc(nm('powders', best.powderId))}</div>
+  // Pistol: best load = lowest pooled velocity SD (same 2+ group gate; needs velocity readings). Not tied to the rifle distance setting.
+  const pistol = isPistol(rid);
+  const pb = pistol ? cs.map((c) => ({ c, vp: velPool(c) })).filter(({ c, vp }) => c.nGroups >= 2 && vp.sd !== null).sort((a, b) => a.vp.sd - b.vp.sd)[0] : null;
+  const pHero = pb
+    ? `<a class="hero" href="${comboHref(pb.c)}"><div class="lbl">Current best load · lowest velocity SD</div><div style="font-size:19px;font-weight:600">${esc(bl(pb.c.bulletId))} · ${esc(nm('powders', pb.c.powderId))}</div>
+      <div class="mono">${pb.c.charge} gn · ${esc(nm('primers', pb.c.primerId))} · COAL ${pb.c.coal}" · ${pb.c.distance} yd</div>
+      <div class="big mono">SD ${fmt(pb.vp.sd, 1)} fps</div><div class="mono">avg ${fin(pb.c.vel) ? Math.round(pb.c.vel) : '—'} fps · ES ${fmt(pb.vp.es, 0)} fps</div>
+      ${pb.c.gsAvg !== null ? `<div class="mono">group avg ${fmt(pb.c.gsAvg, 2)}" · ${fmt(moa(pb.c.gsAvg, pb.c.distance), 2)} MOA</div>` : ''}<div style="opacity:.85;font-size:13px">Tap to see its groups →</div></a>`
+    : `<div class="hero"><div class="lbl">Current best load · lowest velocity SD</div><div style="font-size:19px;font-weight:600">Not enough data yet</div><div>Needs 2+ groups with the exact same Bullet + Powder + Charge + Primer + COAL + Distance, with velocity readings.</div></div>`;
+  main(`<div class="muted">${pistol ? 'Pistol · ' : ''}${esc(calName(r.caliberId))}${r.barrel ? ' · ' + r.barrel + ' in barrel' : ''}</div>
+    ${pistol ? pHero : best ? `<a class="hero" href="${comboHref(best)}"><div class="lbl">Current best load · ${bd} yd</div><div style="font-size:19px;font-weight:600">${esc(bl(best.bulletId))} · ${esc(nm('powders', best.powderId))}</div>
       <div class="mono">${best.charge} gn · ${esc(nm('primers', best.primerId))} · ${best.jump} thou jump</div>
       <div class="big mono">${fmt(best.mr)}"</div><div class="mono">MR ${fmt(best.mrMoa, 2)} MOA · ES ${fmt(best.esMoa, 2)} MOA</div><div style="opacity:.85;font-size:13px">Tap to see its groups →</div></a>`
       : `<div class="hero"><div class="lbl">Current best load · ${bd} yd</div><div style="font-size:19px;font-weight:600">Not enough data yet</div><div>Needs 2+ groups at the exact same Bullet + Powder + Charge + Primer + Jump at ${bd} yd. Other distances are on the Best Loads page.</div></div>`}
@@ -379,8 +419,8 @@ function viewRifle(rid) {
     ${latest ? `<a class="card" href="#/session/${latest.id}"><div class="lbl">Current session · tap to open</div><div class="row sb"><b>${esc(sessionLabel(latest))}</b><span class="mono">${fin(latest.fouling) ? latest.fouling : 0} fouling · ${groupsOf(latest.id).length} grp</span></div></a>` : ''}
     ${latest ? `<a class="btn dark" href="#/add/${rid}">+ Add New Group</a>` : ''}
     <button class="btn ${latest ? '' : 'dark'}" data-act="new-session" data-id="${rid}">+ Start New Session</button>
-    <a class="btn" href="#/best/${rid}">Best Loads by Distance</a>
-    <a class="btn" href="#/load/${rid}">Load Analysis</a>
+    ${pistol ? '' : `<a class="btn" href="#/best/${rid}">Best Loads by Distance</a>
+    <a class="btn" href="#/load/${rid}">Load Analysis</a>`}
     <a class="btn" href="#/sessions/${rid}">View Session Data</a>
     <a class="btn" href="#/all/${rid}">View All Data</a>`);
 }
@@ -388,15 +428,16 @@ function viewRifle(rid) {
 function viewAll(rid) {
   const r = byId('rifles', rid);
   if (!r) return viewHome();
-  if (F.rid !== rid) F = { rid, powder: '', bullet: '', primer: '', charge: '', jump: '', distance: '' };
-  bar(back('#/rifle/' + rid, 'Rifle', true), 'All Data', '', rid);
+  if (F.rid !== rid) F = { rid, powder: '', bullet: '', primer: '', charge: '', jump: '', coal: '', distance: '' };
+  const pistol = isPistol(rid);
+  bar(back('#/rifle/' + rid, 'Firearm', true), 'All Data', '', rid);
   const all = S.groups.filter((g) => g.rifleId === rid);
   const gs = all.filter((g) => (!F.powder || g.powderId === F.powder) && (!F.bullet || g.bulletId === F.bullet) && (!F.primer || g.primerId === F.primer) &&
-    (!F.charge || String(Number(g.charge)) === F.charge) && (!F.jump || String(Number(g.jump)) === F.jump) && (!F.distance || String(Number(g.distance)) === F.distance));
+    (!F.charge || String(Number(g.charge)) === F.charge) && (!F.jump || String(Number(g.jump)) === F.jump) && (!F.coal || String(Number(g.coal)) === F.coal) && (!F.distance || String(Number(g.distance)) === F.distance));
   const used = (k, s) => S[s].filter((x) => all.some((g) => g[k] === x.id));
   const dist = (k) => [...new Set(all.map((g) => String(Number(g[k]))))].sort((a, b) => a - b);
   const sel = (key, label, inner) => `<div class="f"><label class="lbl" for="F-${key}">${label}</label><select class="in" style="min-height:48px;font-size:16px" id="F-${key}" data-filter="${key}">${inner}</select></div>`;
-  const filtering = !!(F.powder || F.bullet || F.primer || F.charge || F.jump || F.distance);
+  const filtering = !!(F.powder || F.bullet || F.primer || F.charge || F.jump || F.coal || F.distance);
   const list = sessionsOf(rid).sort((a, b) => b.date.localeCompare(a.date) || b.ts - a.ts).map((se) => {
     const mine = gs.filter((g) => g.sessionId === se.id).sort((a, b) => a.ts - b.ts);
     if (filtering && !mine.length) return '';
@@ -413,17 +454,18 @@ function viewAll(rid) {
     ${sel('bullet', 'Bullet', opts(used('bulletId', 'bullets'), F.bullet, (x) => x.name + (fin(x.weight) ? ' ' + x.weight : ''), 'All'))}
     ${sel('primer', 'Primer', opts(used('primerId', 'primers'), F.primer, (x) => x.name, 'All'))}
     ${sel('charge', 'Charge', '<option value="">All</option>' + dist('charge').map((c) => `<option${c === F.charge ? ' selected' : ''}>${c}</option>`).join(''))}
-    ${sel('jump', 'Jump', '<option value="">All</option>' + dist('jump').map((c) => `<option${c === F.jump ? ' selected' : ''}>${c}</option>`).join(''))}
+    ${pistol ? sel('coal', 'COAL (in)', '<option value="">All</option>' + dist('coal').map((c) => `<option${c === F.coal ? ' selected' : ''}>${c}</option>`).join(''))
+      : sel('jump', 'Jump', '<option value="">All</option>' + dist('jump').map((c) => `<option${c === F.jump ? ' selected' : ''}>${c}</option>`).join(''))}
     ${sel('distance', 'Distance (yd)', '<option value="">All</option>' + dist('distance').map((c) => `<option${c === F.distance ? ' selected' : ''}>${c}</option>`).join(''))}</div>
     <div class="muted">${gs.length} of ${all.length} groups shown · by session, newest first</div>
     ${list || '<div class="card muted">No groups match.</div>'}
     ${cs.length ? `<h2>Pooled combos (filtered)</h2>${cs.map((c) => comboRow(c, false)).join('')}` : ''}
-    <h2>Historical · manual ES only</h2>
+    ${pistol ? '' : `<h2>Historical · manual ES only</h2>
     <div class="muted">Pre-existing data without X/Y. Kept separate — never mixed into mean-radius stats.</div>
     ${[...hmap.values()].map((arr) => { const es = arr.filter((h) => fin(h.es)); const avg = es.length ? es.reduce((a, h) => a + h.es, 0) / es.length : null;
       return `<div class="card"><b>${esc(bl(arr[0].bulletId))} · ${esc(nm('powders', arr[0].powderId))} ${arr[0].charge} gn</b><div class="kv"><span>Reference avg ES (${es.length} entr${es.length === 1 ? 'y' : 'ies'})</span><b>${fmt(avg)}"</b></div>
       ${arr.map((h) => `<div class="row sb muted"><span>${esc(h.note || '—')} · ES ${fmt(h.es)}</span><button class="btn sm" data-act="edit-hist" data-id="${h.id}">Edit</button></div>`).join('')}</div>`; }).join('')}
-    <button class="btn" data-act="new-hist" data-id="${rid}">+ Add historical entry</button>`);
+    <button class="btn" data-act="new-hist" data-id="${rid}">+ Add historical entry</button>`}`);
 }
 
 const newest = (a, b) => b.date.localeCompare(a.date) || b.ts - a.ts;
@@ -432,7 +474,7 @@ const sessMeta = (se) => `${fin(se.fouling) ? se.fouling : 0} fouling${fin(se.te
 function viewSessions(rid) {
   const r = byId('rifles', rid);
   if (!r) return viewHome();
-  bar(back('#/rifle/' + rid, 'Rifle', true), 'Sessions', '', rid);
+  bar(back('#/rifle/' + rid, 'Firearm', true), 'Sessions', '', rid);
   const list = sessionsOf(rid).sort(newest).map((se) => {
     const gs = groupsOf(se.id);
     return `<a class="card" href="#/session/${se.id}"><div class="row sb"><b>${esc(sessionLabel(se))}</b><span class="mono">${gs.length} grp · ${gs.reduce((a, g) => a + g.shots.length, 0)} shots</span></div><div class="muted">${sessMeta(se)}</div></a>`;
@@ -462,16 +504,23 @@ function viewCombo(rid, key) {
   const gs = S.groups.filter((g) => g.rifleId === rid && ckey(g) === key)
     .sort((a, b) => (sessOf(b) ? sessOf(b).date : '').localeCompare(sessOf(a) ? sessOf(a).date : '') || b.ts - a.ts);
   if (!r || !gs.length) return viewHome();
-  bar(back('#/rifle/' + rid, 'Rifle'), 'Load', '', rid);
+  bar(back('#/rifle/' + rid, 'Firearm'), 'Load', '', rid);
   const c = combos(gs)[0];
   const excl = gs.filter((g) => g.include === false).length;
+  const pistol = isPistol(rid), vp = c && pistol ? velPool(c) : null;
   main(`<div><h1 style="font-size:22px">${esc(comboLabel(gs[0]))}</h1></div>
-    ${c ? `<div class="hero"><div class="grid2"><div><div class="lbl">Pooled mean radius</div><div class="big mono">${fmt(c.mr)}"</div><div class="mono">${fmt(c.mrMoa, 2)} MOA</div></div>
+    ${pistol && c ? `<div class="hero"><div class="grid2"><div><div class="lbl">Pooled velocity SD</div><div class="big mono">${fmt(vp.sd, 1)}</div><div class="mono">fps · n=${vp.n} readings</div></div>
+      <div><div class="lbl">Velocity ES</div><div class="big mono">${fmt(vp.es, 0)}</div><div class="mono">fps · avg ${fin(c.vel) ? Math.round(c.vel) : '—'}</div></div></div>
+      <div>${c.nGroups} group${c.nGroups === 1 ? '' : 's'} · ${c.nShots} shots</div>
+      <div class="mono">Group size avg ${fmt(c.gsAvg, 2)}" · ${fmt(moa(c.gsAvg, c.distance), 2)} MOA · ${c.gsN} of ${c.nGroups} groups had a size</div>
+      ${c.nGroups < 2 ? '<div style="font-weight:600">Not enough data yet — needs 2+ groups to rank</div>' : ''}</div>
+      <div class="muted">Velocity SD and ES pool every shot that has a reading across the groups (Include = Y only). Group size is a simple average of the manual sizes at this distance, not a precision metric.${excl ? ` ${excl} excluded group${excl === 1 ? ' is' : 's are'} shown dimmed below.` : ''}</div>`
+    : c ? `<div class="hero"><div class="grid2"><div><div class="lbl">Pooled mean radius</div><div class="big mono">${fmt(c.mr)}"</div><div class="mono">${fmt(c.mrMoa, 2)} MOA</div></div>
       <div><div class="lbl">Avg ES</div><div class="big mono">${fmt(c.es)}"</div><div class="mono">${fmt(c.esMoa, 2)} MOA</div></div></div>
       <div>${c.nGroups} group${c.nGroups === 1 ? '' : 's'} · ${c.nShots} shots · avg velocity ${fin(c.vel) ? Math.round(c.vel) : '—'} fps</div>
       ${c.nGroups < 2 ? '<div style="font-weight:600">Not enough data yet — needs 2+ groups to rank</div>' : ''}</div>`
       : '<div class="card warn">Every group of this load is excluded from analysis, so there are no pooled stats.</div>'}
-    <div class="muted">Pooled mean radius is weighted by shots and counts only groups with Include = Y. ES is the average of each group's calculated ES.${excl ? ` ${excl} excluded group${excl === 1 ? ' is' : 's are'} shown dimmed below.` : ''}</div>
+    ${pistol ? '' : `<div class="muted">Pooled mean radius is weighted by shots and counts only groups with Include = Y. ES is the average of each group's calculated ES.${excl ? ` ${excl} excluded group${excl === 1 ? ' is' : 's are'} shown dimmed below.` : ''}</div>`}
     <h2>All groups with this load</h2>
     ${gs.map((g) => groupCard(g, true)).join('')}`);
 }
@@ -481,7 +530,8 @@ let showThin = false; // Best page: off by default, so only ranked loads show
 function viewBest(rid) {
   const r = byId('rifles', rid);
   if (!r) return viewHome();
-  bar(back('#/rifle/' + rid, 'Rifle', true), 'Best by Distance', '', rid);
+  if (isPistol(rid)) { navTo('#/rifle/' + rid, true); return; } // rifle-only page (ranks by mean radius)
+  bar(back('#/rifle/' + rid, 'Firearm', true), 'Best by Distance', '', rid);
   const cs = combos(S.groups.filter((g) => g.rifleId === rid));
   const dists = [...new Set(cs.map((c) => Number(c.distance)))].sort((a, b) => a - b);
   const sections = dists.map((d) => {
@@ -584,7 +634,8 @@ function viewLoad(rid) {
   const r = byId('rifles', rid);
   if (!r) return viewHome();
   if (LA.rid !== rid) LA = { rid, bullet: '', powder: '', powderB: '', sort: 'mr', thin: false, ladderThin: false, compare: false };
-  bar(back('#/rifle/' + rid, 'Rifle', true), 'Load Analysis', '', rid);
+  if (isPistol(rid)) { navTo('#/rifle/' + rid, true); return; } // rifle-only page (ranks by mean radius)
+  bar(back('#/rifle/' + rid, 'Firearm', true), 'Load Analysis', '', rid);
   const all = S.groups.filter((g) => g.rifleId === rid);
   const usedIds = (k) => new Set(all.map((g) => g[k]));
   const bullets = S.bullets.filter((b) => usedIds('bulletId').has(b.id)), powders = S.powders.filter((p) => usedIds('powderId').has(p.id));
@@ -629,7 +680,7 @@ function viewLoad(rid) {
 
 /* ---------- Tools ---------- */
 function viewTools() {
-  bar(back('#/', 'Rifles', true), 'Tools');
+  bar(back('#/', 'Firearms', true), 'Tools');
   main(`<h1>Tools</h1>
     <a class="card" href="#/tools/crimp"><div class="row sb"><b>Crimp test</b><span aria-hidden="true">→</span></div>
       <div class="muted">Check whether your crimp holds COAL in the magazine tube. A decreasing ladder: each pass measures the rounds still in the tube.</div></a>`);
@@ -758,9 +809,38 @@ function plotSVG(g, s) {
     <div class="muted">Plot: rings every 0.25" from point of aim · red cross = group center · circles drawn at bullet diameter.</div>`;
 }
 
+// Pistol group detail: manual group size + velocity stats only (no X/Y plot, POA, jump, mean radius or calculated ES).
+function viewGroupPistol(g) {
+  const s = gstats(g), se = sessOf(g) || {}, gid = g.id;
+  bar(back('#/session/' + g.sessionId + '?g=' + gid, 'Session'), 'Group · ' + gdate(g), `<a class="r" href="#/edit/${gid}">Edit</a>`, g.rifleId);
+  const sess = groupsOf(g.sessionId);
+  main(`<div><h1 style="font-size:24px">${esc(se.id ? sessionLabel(se) : '—')} · Group ${sess.findIndex((x) => x.id === g.id) + 1}</h1>
+    <div class="muted">${esc(bl(g.bulletId))} · ${esc(nm('powders', g.powderId))} ${g.charge} gn · ${esc(nm('primers', g.primerId))} · COAL ${fin(g.coal) ? g.coal + '"' : '—'} · ${fin(g.distance) ? g.distance + ' yd' : 'no distance'}</div>
+    <div class="row" style="margin-top:6px">${g.include === false ? '<span class="tag a">Excluded from analysis</span>' : '<span class="tag g">Included</span>'}${g.reference ? '<span class="tag g">Reference group</span>' : ''}</div></div>
+    <div class="hero"><div class="lbl">Group size (manual, outside-to-outside)</div><div class="big mono">${fmt(g.groupSize, 2)}"</div><div class="mono">${fmt(moa(g.groupSize, g.distance), 2)} MOA</div>
+      <div style="opacity:.85;font-size:13px">at ${fin(g.distance) ? g.distance + ' yd' : '— (set a distance to see MOA)'}</div></div>
+    <div class="card"><div class="lbl">Velocity · ${s.vn} of ${s.total} shots</div>
+      <div class="kv"><span>Average</span><b>${fin(s.vavg) ? s.vavg.toFixed(0) + ' fps' : '—'}</b></div>
+      <div class="kv"><span>Std dev (sample)</span><b>${fmt(s.vsd, 1)}</b></div>
+      <div class="kv"><span>Extreme spread</span><b>${fmt(s.ves, 0)}</b></div></div>
+    <div class="card"><a href="#/session/${g.sessionId}?g=${g.id}" style="display:flex;flex-direction:column;gap:8px;color:inherit">
+      <div class="row sb"><div class="lbl">Session · tap to see all its groups</div><span aria-hidden="true">→</span></div>
+      <b>${esc(se.id ? sessionLabel(se) : '—')}</b>
+      <div class="muted">${fin(se.temp) ? se.temp + ' F · ' : ''}${esc(se.wind || 'no wind noted')}</div>
+      <div class="kv"><span>Session fouling shots</span><b>${fin(se.fouling) ? se.fouling : 0}</b></div>
+      <div class="kv"><span>Rounds since clean (at start of group)</span><b>${roundsSinceClean(g) ?? '—'}</b></div></a>
+      <button class="btn sm" data-act="edit-session" data-id="${g.sessionId}">Edit session</button></div>
+    <div class="card"><div class="lbl">Shots</div><table><thead><tr><th>#</th><th>Velocity (fps)</th></tr></thead><tbody>
+      ${g.shots.map((p, i) => `<tr><td>${i + 1}</td><td>${fin(p.v) ? p.v : '—'}</td></tr>`).join('')}</tbody></table></div>
+    ${g.notes ? `<div class="card"><div class="lbl">Notes</div>${esc(g.notes)}</div>` : ''}
+    <a class="btn dark" href="#/add/${g.sessionId}?from=${g.id}">+ Add another group (same session &amp; load)</a>
+    <button class="btn danger" data-act="del-group" data-id="${g.id}">Delete group</button>`);
+}
+
 function viewGroup(gid) {
   const g = byId('groups', gid);
   if (!g) return viewHome();
+  if (isPistol(g.rifleId)) return viewGroupPistol(g);
   const s = gstats(g);
   const se = sessOf(g) || {};
   bar(back('#/session/' + g.sessionId + '?g=' + gid, 'Session'), 'Group · ' + gdate(g), `<a class="r" href="#/edit/${gid}">Edit</a>`, g.rifleId);
@@ -804,9 +884,105 @@ function shotRow(i, p = {}) {
   return `<tr><td class="mono" style="width:24px;padding:0"><b>${i + 1}</b></td>${c('sv', p.v, 'velocity', false)}${c('sx', p.x, 'X', true)}${c('sy', p.y, 'Y', true)}</tr>`;
 }
 
+/* Pistol group form: no X/Y, bullseye, jump or calculated spread. Explicit shot count with one velocity box per shot (a blank reading still counts as a shot),
+   one manual group size, and COAL (required: it is part of the pistol combo key). */
+const vRow = (i, val) => `<tr data-i="${i}"><td class="mono" style="width:24px;padding:0"><b>${i + 1}</b></td><td class="cell"><input class="in m sv" inputmode="decimal" aria-label="Shot ${i + 1} velocity (fps)" placeholder="fps" value="${esc(val ?? '')}" autocomplete="off"></td></tr>`;
+function viewGroupFormPistol(rid, gid, fromId, sid) {
+  const r = byId('rifles', rid);
+  const g0 = gid ? byId('groups', gid) : null;
+  const src = g0 || (fromId && byId('groups', fromId)) || S.groups.filter((g) => g.rifleId === rid).sort((a, b) => b.ts - a.ts)[0] || {};
+  const missing = !S.bullets.length || !S.powders.length || !S.primers.length;
+  bar(back(g0 ? '#/group/' + gid : '#/session/' + sid, g0 ? 'Group' : 'Session'), g0 ? 'Edit Group' : 'New Group', '', rid);
+  const curSid = g0 ? g0.sessionId : sid;
+  const sessOpts = sessionsOf(rid).sort((a, b) => b.date.localeCompare(a.date) || b.ts - a.ts)
+    .map((x) => `<option value="${x.id}"${x.id === curSid ? ' selected' : ''}>${esc(sessionLabel(x))} · ${fin(x.fouling) ? x.fouling : 0} fouling</option>`).join('');
+  const bLabel = (x) => x.name + (fin(x.weight) ? ' ' + x.weight + ' gn' : '');
+  const filtered = bulletsFor(rid, src.bulletId);
+  const n0 = g0 ? g0.shots.length : (src.shots && src.shots.length ? src.shots.length : 10);
+  const vals = Array.from({ length: Math.max(n0, 30) }, (_, i) => (g0 && g0.shots[i] && fin(g0.shots[i].v) ? String(g0.shots[i].v) : ''));
+  const sec = (t) => `<h2 style="color:var(--accent-text);border-color:var(--accent-text)">${t}</h2>`;
+  const fld = (id, label, val, cls = 'm', extra = '') => `<div class="f"><label class="lbl" for="${id}">${label}</label><input class="in ${cls}" id="${id}" type="text" ${cls === 'm' ? 'inputmode="decimal"' : ''} value="${esc(val ?? '')}" autocomplete="off" ${extra}></div>`;
+  const yn = (name, on) => `<div class="seg"><label><input type="radio" name="${name}" value="1"${on ? ' checked' : ''}><span>Y</span></label><label><input type="radio" name="${name}" value="0"${on ? '' : ' checked'}><span>N</span></label></div>`;
+  main(`${missing ? '<div class="card warn">Add at least one Bullet, Powder and Primer in <a href="#/settings" style="text-decoration:underline">Settings</a> first.</div>' : ''}
+    <form id="gform" data-pistol="1" autocomplete="off">
+    ${sec('SESSION')}
+    <div class="f"><label class="lbl" for="f-session">Session</label><select class="in" id="f-session">${sessOpts}</select></div>
+    <div class="muted">Date, wind, temp and fouling shots belong to the session. Change them with Edit session on the firearm or group page.</div>
+    ${sec('LOAD')}
+    <div class="f"><label class="lbl" for="f-bullet">Bullet</label><select class="in" id="f-bullet">${opts(filtered, src.bulletId, bLabel)}</select>
+    ${r.caliberId ? `<div class="muted">Showing ${esc(calName(r.caliberId))} bullets (and any with no caliber set).${filtered.length < S.bullets.length ? ' <label style="text-decoration:underline"><input type="checkbox" id="f-allcal"> show all bullets</label>' : ''}</div>`
+      : '<div class="muted">Set this firearm\'s caliber (firearm → Edit) to filter bullets automatically.</div>'}</div>
+    <div class="f"><label class="lbl" for="f-powder">Powder</label><select class="in" id="f-powder">${opts(S.powders, src.powderId, (x) => x.name)}</select></div>
+    <div class="grid2">${fld('f-charge', 'Charge (gn)', src.charge)}${fld('f-coal', 'COAL (in)', src.coal)}</div>
+    <div class="f"><label class="lbl" for="f-primer">Primer</label><select class="in" id="f-primer">${opts(S.primers, src.primerId, (x) => x.name)}</select></div>
+    ${fld('f-dist', 'Distance (yards)', fin(src.distance) ? src.distance : 25)}
+    ${sec('GROUP')}
+    ${fld('f-size', 'Group size (manual, outside-to-outside)', g0 && fin(g0.groupSize) ? g0.groupSize : '')}
+    <div class="muted">One number in inches, measured at the distance above. Optional.</div>
+    ${sec('FLAGS')}
+    <div class="grid2"><div class="f"><span class="lbl">Include in analysis</span>${yn('inc', g0 ? g0.include !== false : true)}</div>
+    <div class="f"><span class="lbl">Reference group</span>${yn('ref', g0 ? !!g0.reference : false)}</div></div>
+    ${fld('f-notes', 'Notes', g0 ? g0.notes : '', '')}
+    ${sec('SHOTS')}
+    ${fld('f-nshots', 'Shots fired', n0)}
+    <div class="muted">One velocity box per shot. Leave a box blank if the chronograph missed it: it still counts as a shot.</div>
+    <table class="shots"><thead><tr><th></th><th>Velocity fps</th></tr></thead><tbody id="shots" data-kind="v">${Array.from({ length: n0 }, (_, i) => vRow(i, vals[i])).join('')}</tbody></table>
+    <div class="card" id="preview"></div>
+    <button class="btn pri" type="submit" ${missing ? 'disabled' : ''}>Save group</button></form>`);
+  const count = () => { const n = num($('#f-nshots').value); return n !== null && n >= 1 ? Math.min(30, Math.round(n)) : 0; };
+  const shotsNow = () => Array.from({ length: count() }, (_, i) => ({ v: num(vals[i]) }));
+  const pv = () => {
+    const box = $('#preview'); if (!box) return;
+    const s = gstats({ bulletId: $('#f-bullet').value, shots: shotsNow() }), size = num($('#f-size').value), d = num($('#f-dist').value);
+    box.innerHTML = `<div class="lbl">Live preview</div><div class="grid3">
+      <div><div class="lbl">Avg vel</div><span class="mono v">${fin(s.vavg) ? s.vavg.toFixed(0) : '—'}</span></div>
+      <div><div class="lbl">Vel SD</div><span class="mono v">${fmt(s.vsd, 1)}</span></div>
+      <div><div class="lbl">Vel ES</div><span class="mono v">${fmt(s.ves, 0)}</span></div></div>
+      <div class="muted">${s.total} shot${s.total === 1 ? '' : 's'} · ${s.vn} with a velocity reading · size ${fmt(size, 2)}" = ${fmt(moa(size, d), 2)} MOA</div>`;
+  };
+  const form = $('#gform');
+  form.addEventListener('input', (e) => {
+    if (e.target.classList.contains('sv')) vals[Number(e.target.closest('tr').dataset.i)] = e.target.value.trim();
+    else if (e.target.id === 'f-nshots') { const n = count(); if (n) $('#shots').innerHTML = Array.from({ length: n }, (_, i) => vRow(i, vals[i])).join(''); }
+    pv();
+  });
+  form.addEventListener('change', (e) => {
+    if (e.target.id === 'f-allcal') {
+      const cur = $('#f-bullet').value;
+      $('#f-bullet').innerHTML = opts(e.target.checked ? S.bullets : bulletsFor(rid, cur), cur, bLabel);
+    }
+    pv();
+  });
+  form.onsubmit = (e) => { e.preventDefault(); saveGroupPistol(rid, gid, g0, shotsNow()); };
+  pv();
+}
+async function saveGroupPistol(rid, gid, g0, shots) {
+  const sessionId = $('#f-session').value;
+  if (!byId('sessions', sessionId)) return toast('Pick a session');
+  const charge = num($('#f-charge').value), coal = num($('#f-coal').value), distance = num($('#f-dist').value), size = num($('#f-size').value);
+  if (charge === null) return toast('Charge weight is required');
+  if (coal === null || coal <= 0) return toast('COAL is required for a pistol');
+  if (distance === null || distance <= 0) return toast('Distance in yards is required');
+  if (size !== null && size <= 0) return toast('Group size must be more than 0');
+  if (!shots.length) return toast('Shots fired must be at least 1');
+  const g = {
+    id: gid || uid(), rifleId: rid, sessionId,
+    ts: g0 && g0.sessionId === sessionId ? g0.ts : Date.now(),
+    bulletId: $('#f-bullet').value, powderId: $('#f-powder').value, primerId: $('#f-primer').value,
+    charge, coal, distance, groupSize: size,
+    include: $('input[name=inc]:checked').value === '1', reference: $('input[name=ref]:checked').value === '1',
+    notes: $('#f-notes').value.trim(), shots
+  };
+  if (!g.bulletId || !g.powderId || !g.primerId) return toast('Pick bullet, powder and primer');
+  await put('groups', g);
+  if (g0 && navIdx > 0) history.back();
+  else navTo('#/group/' + g.id, true);
+}
+
 function viewGroupForm(rid, gid, fromId, sid) {
   const r = byId('rifles', rid);
   if (!r) return viewHome();
+  if (isPistol(rid)) return viewGroupFormPistol(rid, gid, fromId, sid);
   const g0 = gid ? byId('groups', gid) : null;
   const src = g0 || (fromId && byId('groups', fromId)) || S.groups.filter((g) => g.rifleId === rid).sort((a, b) => b.ts - a.ts)[0] || {};
   const missing = !S.bullets.length || !S.powders.length || !S.primers.length;
@@ -824,11 +1000,11 @@ function viewGroupForm(rid, gid, fromId, sid) {
     <form id="gform" autocomplete="off">
     ${sec('SESSION')}
     <div class="f"><label class="lbl" for="f-session">Session</label><select class="in" id="f-session">${sessOpts}</select></div>
-    <div class="muted">Date, wind, temp and fouling shots belong to the session. Change them with Edit session on the rifle or group page.</div>
+    <div class="muted">Date, wind, temp and fouling shots belong to the session. Change them with Edit session on the firearm or group page.</div>
     ${sec('LOAD')}
     <div class="f"><label class="lbl" for="f-bullet">Bullet</label><select class="in" id="f-bullet">${opts(filtered, src.bulletId, bLabel)}</select>
     ${r.caliberId ? `<div class="muted">Showing ${esc(calName(r.caliberId))} bullets (and any with no caliber set).${filtered.length < S.bullets.length ? ' <label style="text-decoration:underline"><input type="checkbox" id="f-allcal"> show all bullets</label>' : ''}</div>`
-      : '<div class="muted">Set this rifle\'s caliber (rifle → Edit) to filter bullets automatically.</div>'}</div>
+      : '<div class="muted">Set this firearm\'s caliber (firearm → Edit) to filter bullets automatically.</div>'}</div>
     <div class="f"><label class="lbl" for="f-powder">Powder</label><select class="in" id="f-powder">${opts(S.powders, src.powderId, (x) => x.name)}</select></div>
     <div class="grid2">${fld('f-charge', 'Charge (gn)', src.charge)}${fld('f-jump', 'Jump (thou off lands)', src.jump)}</div>
     ${fld('f-dist', 'Distance (yards)', fin(src.distance) ? src.distance : 100)}
@@ -928,13 +1104,13 @@ function sessionForm(rid, se) {
 }
 
 function viewSettings() {
-  bar(back('#/', 'Rifles', true), 'Settings');
+  bar(back('#/', 'Firearms', true), 'Settings');
   const lib = (title, s, sub) => `<h2 class="row sb" style="align-items:center">${title}<button class="btn sm" data-act="lib-new" data-s="${s}">+ Add</button></h2>
     ${S[s].slice().sort((a, b) => a.name.localeCompare(b.name)).map((x) => `<div class="item" role="button" tabindex="0" data-act="lib-edit" data-s="${s}" data-id="${x.id}"><div>${esc(x.name)}${sub(x) ? `<small>${esc(sub(x))}</small>` : ''}</div><span class="muted">Edit</span></div>`).join('') || '<div class="muted">None yet.</div>'}`;
   main(`<h1>Components</h1>
     ${lib('CALIBERS', 'calibers', () => '')}
-    <div class="muted" style="margin-top:-4px">Add a caliber once (e.g. ".308 Win"), then pick it on each rifle and each bullet. A rifle only offers bullets of its own caliber.</div>
-    ${lib('RIFLES', 'rifles', (x) => `${calName(x.caliberId) || 'no caliber'}${x.barrel ? ' · ' + x.barrel + ' in' : ''} · start ${x.startRounds || 0} rds`).replace('data-act="lib-new" data-s="rifles"', 'data-act="new-rifle"')}
+    <div class="muted" style="margin-top:-4px">Add a caliber once (e.g. ".308 Win"), then pick it on each firearm and each bullet. A firearm only offers bullets of its own caliber.</div>
+    ${lib('FIREARMS', 'rifles', (x) => `${calName(x.caliberId) || 'no caliber'}${x.barrel ? ' · ' + x.barrel + ' in' : ''} · start ${x.startRounds || 0} rds`).replace('data-act="lib-new" data-s="rifles"', 'data-act="new-rifle"')}
     ${lib('BULLETS', 'bullets', (x) => [calName(x.caliberId), x.style, fin(x.weight) ? x.weight + ' gn' : '', fin(x.diameter) ? 'dia ' + x.diameter + ' in' : ''].filter(Boolean).join(' · '))}
     ${lib('POWDERS', 'powders', () => '')}
     ${lib('PRIMERS', 'primers', (x) => x.type || '')}
@@ -946,7 +1122,7 @@ function viewSettings() {
     <div class="muted">Auto follows your phone's light or dark setting. Theme and accent are saved on this device only.</div>
     <h2>PREFERENCES</h2>
     <div class="f"><label class="lbl" for="pref-dist">Main-screen best load distance (yards)</label><input class="in m" id="pref-dist" inputmode="numeric" value="${bestDist()}"></div>
-    <div class="muted">The rifle page shows the best load at this distance. Every distance is on the Best Loads page.</div>
+    <div class="muted">The firearm page shows the best rifle load at this distance. Every distance is on the Best Loads page.</div>
     <h2>BACKUP</h2>
     <div class="muted">Data lives only on this device. Export a JSON file to back up or move it to another device.</div>
     <div class="grid2"><button class="btn dark" data-act="export">Export data</button><button class="btn" data-act="import">Import data</button></div>
