@@ -117,7 +117,7 @@ const byId = (s, id) => S[s].find((x) => x.id === id);
 async function exportData() {
   const data = {};
   for (const s of STORES) data[s] = S[s];
-  const blob = new Blob([JSON.stringify({ app: '308-load-dev-tracker', version: 5, exported: new Date().toISOString(), data }, null, 2)], { type: 'application/json' });
+  const blob = new Blob([JSON.stringify({ app: '308-load-dev-tracker', version: 6, exported: new Date().toISOString(), data }, null, 2)], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = `load-dev-backup-${today()}.json`;
@@ -316,10 +316,14 @@ const back = (href, label, up) => (up ? `<a href="${href}" data-up>← ${esc(lab
 const opts = (list, sel, lab, blank) => (blank ? `<option value="">${esc(blank)}</option>` : '') + list.map((x) => `<option value="${esc(x.id)}"${x.id === sel ? ' selected' : ''}>${esc(lab(x))}</option>`).join('');
 let F = { rid: null, powder: '', bullet: '', primer: '', charge: '', jump: '' };
 
+// a pick-any list of checkboxes (stored as an array of ids)
+const multiField = (f, vals) => `<div class="f" id="d-${f.k}"><span class="lbl">${esc(f.label)}</span>${f.opts.length
+  ? f.opts.map((o) => `<label class="row" style="min-height:44px"><input type="checkbox" name="m-${f.k}" value="${esc(o[0])}"${(vals[f.k] || []).includes(o[0]) ? ' checked' : ''} style="width:24px;height:24px"> ${esc(o[1])}</label>`).join('')
+  : `<div class="muted">${esc(f.empty || 'Nothing to pick yet.')}</div>`}</div>`;
 function formDialog(title, fields, vals, onSave, onDelete) {
   const d = document.createElement('dialog');
   d.innerHTML = `<form method="dialog"><h1 style="font-size:22px">${esc(title)}</h1>
-    ${fields.map((f) => `<div class="f"><label class="lbl" for="d-${f.k}">${esc(f.label)}</label>${
+    ${fields.map((f) => f.type === 'multi' ? multiField(f, vals) : `<div class="f"><label class="lbl" for="d-${f.k}">${esc(f.label)}</label>${
       f.type === 'select'
         ? `<select class="in" id="d-${f.k}"${f.disabled ? ' disabled' : ''}>${f.opts.map((o) => `<option value="${esc(o[0])}"${o[0] === vals[f.k] ? ' selected' : ''}>${esc(o[1])}</option>`).join('')}</select>`
         : `<input class="in ${f.type === 'num' ? 'm' : ''}" id="d-${f.k}" type="text" ${f.type === 'num' ? 'inputmode="decimal"' : ''} ${f.list ? `list="dl-${f.k}"` : ''} value="${esc(vals[f.k] ?? '')}" autocomplete="off">${f.list ? `<datalist id="dl-${f.k}">${f.list.map((o) => `<option value="${esc(o)}">`).join('')}</datalist>` : ''}`}</div>`).join('')}
@@ -334,6 +338,7 @@ function formDialog(title, fields, vals, onSave, onDelete) {
     e.preventDefault();
     const out = {};
     for (const f of fields) {
+      if (f.type === 'multi') { out[f.k] = $$(`input[name="m-${f.k}"]:checked`, d).map((i) => i.value); continue; }
       const raw = $('#d-' + f.k, d).value.trim();
       out[f.k] = f.type === 'num' ? num(raw) : raw;
       if (f.req && (out[f.k] === null || out[f.k] === '')) { toast(`${f.label} is required`); return; }
@@ -984,6 +989,13 @@ function shotRow(i, p = {}) {
 
 /* Case (optional, from the Cases library). NOT part of the combo key, so pooling, rankings and issue flags ignore it.
    A new group starts with the case of the most recent group that has one on the same firearm (by logged order). */
+// Caliber is a display filter only (never touches pooling or stats): cases tagged with the firearm's caliber, plus untagged cases.
+// No firearm caliber = every case. The group's own current case (keepId) is always kept in the list.
+function casesFor(rid, keepId) {
+  const r = byId('rifles', rid);
+  if (!r || !r.caliberId) return S.cases;
+  return S.cases.filter((c) => !(c.caliberIds && c.caliberIds.length) || c.caliberIds.includes(r.caliberId) || c.id === keepId);
+}
 const lastCase = (rid) => {
   const g = S.groups.filter((x) => x.rifleId === rid && x.caseId && byId('cases', x.caseId)).sort((a, b) => b.ts - a.ts)[0];
   return g ? g.caseId : '';
@@ -995,9 +1007,12 @@ function setCaseBulk(rid) {
   const blanks = () => S.groups.filter((g) => g.rifleId === rid && !g.caseId);
   if (!blanks().length) return toast('Every group on this firearm already has a case');
   const old = !S.cfg.lastBackup || Date.now() - S.cfg.lastBackup > 864e5;
+  const filtered = casesFor(rid); // same caliber filter as the group form; if it leaves nothing, show every case
+  const start = filtered.length ? filtered : S.cases;
   const d = document.createElement('dialog');
   d.innerHTML = `<form method="dialog" style="display:flex;flex-direction:column;gap:12px"><h1 style="font-size:22px">Set case for groups without one</h1>
-    <div class="f"><label class="lbl" for="sc-case">Case</label><select class="in" id="sc-case">${opts(S.cases, S.cases[0].id, (x) => x.name)}</select></div>
+    <div class="f"><label class="lbl" for="sc-case">Case</label><select class="in" id="sc-case">${opts(start, start[0].id, (x) => x.name)}</select>
+    ${filtered.length && filtered.length < S.cases.length ? '<div class="muted"><label style="text-decoration:underline"><input type="checkbox" id="sc-all"> show all cases</label></div>' : ''}</div>
     <div class="card"><b id="sc-msg"></b><div class="muted">Groups that already have a case are not changed.</div>
     <div class="muted">${S.cfg.lastBackup ? 'Last backup: ' + new Date(S.cfg.lastBackup).toLocaleString() : 'You have not made a backup yet.'}</div></div>
     <button class="btn ${old ? 'pri' : ''}" type="button" id="sc-backup">Back up first, then set</button>
@@ -1012,6 +1027,7 @@ function setCaseBulk(rid) {
     close(); toast(`Case set on ${n} group${n === 1 ? '' : 's'}`); render();
   };
   $('#sc-case', d).onchange = msg; msg();
+  if ($('#sc-all', d)) $('#sc-all', d).onchange = (e) => { $('#sc-case', d).innerHTML = opts(e.target.checked ? S.cases : filtered, (e.target.checked ? S.cases : filtered)[0].id, (x) => x.name); msg(); };
   $('#sc-x', d).onclick = close;
   $('#sc-go', d).onclick = apply;
   $('#sc-backup', d).onclick = async () => { await exportData(); await apply(); };
@@ -1067,7 +1083,7 @@ function viewGroupFormPistol(rid, gid, fromId, sid) {
     .map((x) => `<option value="${x.id}"${x.id === curSid ? ' selected' : ''}>${esc(sessionLabel(x))} · ${fin(x.fouling) ? x.fouling : 0} fouling</option>`).join('');
   const bLabel = (x) => x.name + (fin(x.weight) ? ' ' + x.weight + ' gn' : '');
   const filtered = bulletsFor(rid, src.bulletId);
-  const caseSel = g0 ? (g0.caseId || '') : lastCase(rid); // a new group starts with the case last used on this firearm (editable)
+  const caseSel = g0 ? (g0.caseId || '') : (casesFor(rid).some((c) => c.id === lastCase(rid)) ? lastCase(rid) : ''); // new group: the case last used on this firearm, only if it passes the caliber filter
   const n0 = g0 ? g0.shots.length : (src.shots && src.shots.length ? src.shots.length : 10);
   const vals = Array.from({ length: Math.max(n0, 30) }, (_, i) => (g0 && g0.shots[i] && fin(g0.shots[i].v) ? String(g0.shots[i].v) : ''));
   const sec = (t) => `<h2 style="color:var(--accent-text);border-color:var(--accent-text)">${t}</h2>`;
@@ -1085,7 +1101,7 @@ function viewGroupFormPistol(rid, gid, fromId, sid) {
     <div class="f"><label class="lbl" for="f-powder">Powder</label><select class="in" id="f-powder">${opts(S.powders, src.powderId, (x) => x.name)}</select></div>
     <div class="grid2">${fld('f-charge', 'Charge (gn)', src.charge)}${fld('f-coal', 'COAL (in)', src.coal)}</div>
     <div class="f"><label class="lbl" for="f-primer">Primer</label><select class="in" id="f-primer">${opts(S.primers, src.primerId, (x) => x.name)}</select></div>
-    <div class="f"><label class="lbl" for="f-case">Case · optional</label><select class="in" id="f-case">${opts(S.cases, caseSel, (x) => x.name, '— none —')}</select></div>
+    <div class="f"><label class="lbl" for="f-case">Case · optional</label><select class="in" id="f-case">${opts(casesFor(rid, caseSel), caseSel, (x) => x.name, '— none —')}</select>${casesFor(rid, caseSel).length < S.cases.length ? '<div class="muted"><label style="text-decoration:underline"><input type="checkbox" id="f-allcase"> show all cases</label></div>' : ''}</div>
     ${fld('f-dist', 'Distance (yards)', fin(src.distance) ? src.distance : 25)}
     ${sec('GROUP')}
     ${fld('f-size', 'Group size (manual, outside-to-outside)', g0 && fin(g0.groupSize) ? g0.groupSize : '')}
@@ -1123,6 +1139,10 @@ function viewGroupFormPistol(rid, gid, fromId, sid) {
     if (e.target.id === 'f-allcal') {
       const cur = $('#f-bullet').value;
       $('#f-bullet').innerHTML = opts(e.target.checked ? S.bullets : bulletsFor(rid, cur), cur, bLabel);
+    }
+    if (e.target.id === 'f-allcase') { // temporarily show every case, keeping the current pick
+      const cur = $('#f-case').value;
+      $('#f-case').innerHTML = opts(e.target.checked ? S.cases : casesFor(rid, cur), cur, (x) => x.name, '— none —');
     }
     issueSync();
     pv();
@@ -1167,7 +1187,7 @@ function viewGroupForm(rid, gid, fromId, sid) {
     .map((x) => `<option value="${x.id}"${x.id === curSid ? ' selected' : ''}>${esc(sessionLabel(x))} · ${fin(x.fouling) ? x.fouling : 0} fouling</option>`).join('');
   const bLabel = (x) => x.name + (fin(x.weight) ? ' ' + x.weight + ' gn' : '');
   const filtered = bulletsFor(rid, src.bulletId);
-  const caseSel = g0 ? (g0.caseId || '') : lastCase(rid); // a new group starts with the case last used on this firearm (editable)
+  const caseSel = g0 ? (g0.caseId || '') : (casesFor(rid).some((c) => c.id === lastCase(rid)) ? lastCase(rid) : ''); // new group: the case last used on this firearm, only if it passes the caliber filter
   const nShots = g0 ? g0.shots.length : 5;
   const sec = (t) => `<h2 style="color:var(--accent-text);border-color:var(--accent-text)">${t}</h2>`;
   const fld = (id, label, val, cls = 'm', extra = '') => `<div class="f"><label class="lbl" for="${id}">${label}</label><input class="in ${cls}" id="${id}" type="text" ${cls === 'm' ? 'inputmode="decimal"' : ''} value="${esc(val ?? '')}" autocomplete="off" ${extra}></div>`;
@@ -1185,7 +1205,7 @@ function viewGroupForm(rid, gid, fromId, sid) {
     <div class="grid2">${fld('f-charge', 'Charge (gn)', src.charge)}${fld('f-jump', 'Jump (thou off lands)', src.jump)}</div>
     ${fld('f-dist', 'Distance (yards)', fin(src.distance) ? src.distance : 100)}
     <div class="f"><label class="lbl" for="f-primer">Primer</label><select class="in" id="f-primer">${opts(S.primers, src.primerId, (x) => x.name)}</select></div>
-    <div class="f"><label class="lbl" for="f-case">Case · optional</label><select class="in" id="f-case">${opts(S.cases, caseSel, (x) => x.name, '— none —')}</select></div>
+    <div class="f"><label class="lbl" for="f-case">Case · optional</label><select class="in" id="f-case">${opts(casesFor(rid, caseSel), caseSel, (x) => x.name, '— none —')}</select>${casesFor(rid, caseSel).length < S.cases.length ? '<div class="muted"><label style="text-decoration:underline"><input type="checkbox" id="f-allcase"> show all cases</label></div>' : ''}</div>
     <div class="grid2">${fld('f-coal', 'COAL (in) · optional', src.coal)}${fld('f-trim', 'Trimmed case (in) · opt.', src.trim)}</div>
     ${sec('FLAGS')}
     <div class="grid2"><div class="f"><span class="lbl">Include in analysis</span>${yn('inc', g0 ? g0.include !== false : true)}</div>
@@ -1206,6 +1226,10 @@ function viewGroupForm(rid, gid, fromId, sid) {
     if (e.target.id === 'f-allcal') { // temporarily show bullets of every caliber, keeping the current pick
       const cur = $('#f-bullet').value;
       $('#f-bullet').innerHTML = opts(e.target.checked ? S.bullets : bulletsFor(rid, cur), cur, bLabel);
+    }
+    if (e.target.id === 'f-allcase') { // temporarily show every case, keeping the current pick
+      const cur = $('#f-case').value;
+      $('#f-case').innerHTML = opts(e.target.checked ? S.cases : casesFor(rid, cur), cur, (x) => x.name, '— none —');
     }
     issueSync();
     preview();
@@ -1296,7 +1320,7 @@ function viewSettings() {
     ${lib('BULLETS', 'bullets', (x) => [calName(x.caliberId), x.style, fin(x.weight) ? x.weight + ' gn' : '', fin(x.diameter) ? 'dia ' + x.diameter + ' in' : ''].filter(Boolean).join(' · '))}
     ${lib('POWDERS', 'powders', () => '')}
     ${lib('PRIMERS', 'primers', (x) => x.type || '')}
-    ${lib('CASES · optional', 'cases', () => '')}
+    ${lib('CASES · optional', 'cases', (x) => (x.caliberIds || []).map((id) => calName(id)).filter(Boolean).join(', '))}
     <h2>APPEARANCE</h2>
     <div class="grid3">${[['light', 'Light'], ['dark', 'Dark'], ['auto', 'Auto']].map(([v, l]) => `<button class="btn ${themePref() === v ? 'pri' : ''}" data-act="theme" data-v="${v}" aria-pressed="${themePref() === v}">${l}</button>`).join('')}</div>
     <div class="lbl">Accent color</div>
@@ -1328,14 +1352,20 @@ const LIBS = {
   powders: [{ k: 'name', label: 'Name', req: true }],
   primers: [{ k: 'name', label: 'Brand / name', req: true },
     { k: 'type', label: 'Type', list: ['Large Rifle', 'Large Rifle Magnum', 'Small Rifle', 'Small Rifle Magnum', 'Large Pistol', 'Large Pistol Magnum', 'Small Pistol', 'Small Pistol Magnum'] }],
-  cases: [{ k: 'name', label: 'Manufacturer / name', req: true }]
+  cases: [{ k: 'name', label: 'Manufacturer / name', req: true }, { k: 'caliberIds', label: 'Calibers (optional, pick any)', type: 'multi', opts: [], empty: 'Add calibers in Settings to tag cases.' }]
 };
 const USE = { bullets: 'bulletId', powders: 'powderId', primers: 'primerId', cases: 'caseId' };
 function libForm(s, x) {
-  formDialog(x ? 'Edit' : 'Add', LIBS[s].map((f) => (f.k === 'caliberId' ? { ...f, opts: calOpts() } : f)), x || (s === 'bullets' ? { diameter: 0.308 } : {}), async (v) => { await put(s, { ...(x || { id: uid() }), ...v }); },
+  formDialog(x ? 'Edit' : 'Add', LIBS[s].map((f) => (f.k === 'caliberId' ? { ...f, opts: calOpts() } : f.k === 'caliberIds' ? { ...f, opts: calOpts().filter((o) => o[0]) } : f)), x || (s === 'bullets' ? { diameter: 0.308 } : {}), async (v) => { await put(s, { ...(x || { id: uid() }), ...v }); },
     x ? async () => {
       if (USE[s] && S.groups.some((g) => g[USE[s]] === x.id)) { toast('In use by logged groups — cannot delete'); return false; }
-      if (s === 'calibers' && (S.rifles.some((r) => r.caliberId === x.id) || S.bullets.some((b) => b.caliberId === x.id))) { toast('In use by a rifle or bullet — cannot delete'); return false; }
+      if (s === 'calibers') { // blocked while anything uses it; the message says what
+        const nF = S.rifles.filter((r) => r.caliberId === x.id).length, nB = S.bullets.filter((b) => b.caliberId === x.id).length, nC = S.cases.filter((c) => (c.caliberIds || []).includes(x.id)).length;
+        if (nF || nB || nC) {
+          toast('In use by ' + [nF && `${nF} firearm${nF === 1 ? '' : 's'}`, nB && `${nB} bullet${nB === 1 ? '' : 's'}`, nC && `${nC} case${nC === 1 ? '' : 's'}`].filter(Boolean).join(', ') + ' — remove it there first');
+          return false;
+        }
+      }
       if (!confirm('Delete this item?')) return false;
       await del(s, x.id); return true;
     } : null);
