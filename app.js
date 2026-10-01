@@ -1,4 +1,5 @@
 'use strict';
+const APP_VERSION = 'v17'; // keep in step with CACHE in sw.js (shown in Settings > About so you can tell which copy a browser is running)
 /* ---------- helpers ---------- */
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
@@ -1338,8 +1339,22 @@ function viewSettings() {
     <div class="f"><label class="lbl" for="bk-groups">New groups</label><input class="in m" id="bk-groups" inputmode="numeric" value="${S.cfg.groups}"></div></div>
     <div class="muted">Whichever comes first. Set either to 0 to turn that trigger off.</div>
     <input type="file" id="imp" accept="application/json,.json" hidden>
-    <div class="muted" id="persist"></div>`);
+    <div class="muted" id="persist"></div>
+    <h2>ABOUT</h2>
+    <div class="muted" id="ver">App version ${APP_VERSION}</div>`);
   $('#imp').onchange = (e) => { if (e.target.files[0]) importData(e.target.files[0]); e.target.value = ''; };
+  // which copy this browser is really running, and whether a newer one is already downloaded and waiting
+  (async () => {
+    const el = $('#ver'); if (!el) return;
+    let line = `App version ${APP_VERSION}`;
+    try {
+      const names = (await caches.keys()).filter((k) => k.startsWith('loaddev-')).sort();
+      line += names.length ? ` · cached copy: ${names.join(', ')}` : ' · no offline copy saved yet';
+      const reg = navigator.serviceWorker && await navigator.serviceWorker.getRegistration();
+      if (reg && reg.waiting) line += ' · a newer version is downloaded and waiting: use "Reload & update", or close every tab of the app and reopen it';
+    } catch (e) { /* version still shown */ }
+    if ($('#ver')) $('#ver').textContent = line;
+  })();
   if (navigator.storage && navigator.storage.persisted) navigator.storage.persisted().then((p) => { const el = $('#persist'); if (el) el.textContent = p ? 'Storage: persistent.' : 'Storage: browser-managed. Export backups occasionally.'; });
 }
 
