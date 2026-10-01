@@ -117,7 +117,7 @@ const byId = (s, id) => S[s].find((x) => x.id === id);
 async function exportData() {
   const data = {};
   for (const s of STORES) data[s] = S[s];
-  const blob = new Blob([JSON.stringify({ app: '308-load-dev-tracker', version: 4, exported: new Date().toISOString(), data }, null, 2)], { type: 'application/json' });
+  const blob = new Blob([JSON.stringify({ app: '308-load-dev-tracker', version: 5, exported: new Date().toISOString(), data }, null, 2)], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = `load-dev-backup-${today()}.json`;
@@ -451,7 +451,8 @@ function viewRifle(rid) {
     <a class="btn" href="#/load/${rid}">Load Analysis</a>`}
     <a class="btn" href="#/sessions/${rid}">View Session Data</a>
     <a class="btn" href="#/all/${rid}">View All Data</a>
-    <a class="btn" href="#/issues/${rid}">Excluded &amp; Flagged</a>`);
+    <a class="btn" href="#/issues/${rid}">Excluded &amp; Flagged</a>
+    <button class="btn sm" data-act="set-case" data-id="${rid}">Set case for groups without one</button>`);
 }
 
 function viewAll(rid) {
@@ -909,6 +910,7 @@ function viewGroupPistol(g) {
   const sess = groupsOf(g.sessionId);
   main(`<div><h1 style="font-size:24px">${esc(se.id ? sessionLabel(se) : '—')} · Group ${sess.findIndex((x) => x.id === g.id) + 1}</h1>
     <div class="muted">${esc(bl(g.bulletId))} · ${esc(nm('powders', g.powderId))} ${g.charge} gn · ${esc(nm('primers', g.primerId))} · COAL ${fin(g.coal) ? g.coal + '"' : '—'} · ${fin(g.distance) ? g.distance + ' yd' : 'no distance'}</div>
+    ${caseLine(g)}
     <div class="row" style="margin-top:6px">${g.include === false ? '<span class="tag a">Excluded from analysis</span>' : '<span class="tag g">Included</span>'}${g.reference ? '<span class="tag g">Reference group</span>' : ''}</div></div>
     ${issueBox(g)}
     <div class="hero"><div class="lbl">Group size (manual, outside-to-outside)</div><div class="big mono">${fmt(g.groupSize, 2)}"</div><div class="mono">${fmt(moa(g.groupSize, g.distance), 2)} MOA</div>
@@ -941,6 +943,7 @@ function viewGroup(gid) {
   const sess = groupsOf(g.sessionId);
   main(`<div><h1 style="font-size:24px">${esc(se.id ? sessionLabel(se) : '—')} · Group ${sess.findIndex((x) => x.id === g.id) + 1}</h1>
     <div class="muted">${esc(bl(g.bulletId))} · ${esc(nm('powders', g.powderId))} ${g.charge} gn · ${esc(nm('primers', g.primerId))} · ${g.jump} thou · ${fin(g.distance) ? g.distance + ' yd' : 'no distance'}</div>
+    ${caseLine(g)}
     <div class="row" style="margin-top:6px">${g.include === false ? '<span class="tag a">Excluded from analysis</span>' : '<span class="tag g">Included</span>'}${g.reference ? '<span class="tag g">Reference group</span>' : ''}</div></div>
     ${issueBox(g)}
     <div class="hero"><div class="grid2"><div><div class="lbl">Mean radius</div><div class="big mono">${fmt(s.mr)}"</div><div class="mono">${fmt(moa(s.mr, g.distance), 2)} MOA</div></div><div><div class="lbl">ES (center)</div><div class="big mono">${fmt(s.es)}"</div><div class="mono">${fmt(moa(s.es, g.distance), 2)} MOA</div></div></div>
@@ -977,6 +980,43 @@ function viewGroup(gid) {
 function shotRow(i, p = {}) {
   const c = (cls, val, lab, sign) => `<td class="cell"><input class="in m ${cls}" inputmode="decimal" aria-label="Shot ${i + 1} ${lab}" value="${fin(val) ? val : ''}" autocomplete="off">${sign ? '<button type="button" class="sg" data-act="sign" aria-label="Toggle sign">±</button>' : ''}</td>`;
   return `<tr><td class="mono" style="width:24px;padding:0"><b>${i + 1}</b></td>${c('sv', p.v, 'velocity', false)}${c('sx', p.x, 'X', true)}${c('sy', p.y, 'Y', true)}</tr>`;
+}
+
+/* Case (optional, from the Cases library). NOT part of the combo key, so pooling, rankings and issue flags ignore it.
+   A new group starts with the case of the most recent group that has one on the same firearm (by logged order). */
+const lastCase = (rid) => {
+  const g = S.groups.filter((x) => x.rifleId === rid && x.caseId && byId('cases', x.caseId)).sort((a, b) => b.ts - a.ts)[0];
+  return g ? g.caseId : '';
+};
+const caseLine = (g) => (g.caseId && byId('cases', g.caseId) ? `<div class="muted">Case: ${esc(nm('cases', g.caseId))}</div>` : '');
+// bulk fill: only groups whose case is blank, never overwriting one; asks first and offers a backup
+function setCaseBulk(rid) {
+  if (!S.cases.length) return toast('Add a case in Settings first');
+  const blanks = () => S.groups.filter((g) => g.rifleId === rid && !g.caseId);
+  if (!blanks().length) return toast('Every group on this firearm already has a case');
+  const old = !S.cfg.lastBackup || Date.now() - S.cfg.lastBackup > 864e5;
+  const d = document.createElement('dialog');
+  d.innerHTML = `<form method="dialog" style="display:flex;flex-direction:column;gap:12px"><h1 style="font-size:22px">Set case for groups without one</h1>
+    <div class="f"><label class="lbl" for="sc-case">Case</label><select class="in" id="sc-case">${opts(S.cases, S.cases[0].id, (x) => x.name)}</select></div>
+    <div class="card"><b id="sc-msg"></b><div class="muted">Groups that already have a case are not changed.</div>
+    <div class="muted">${S.cfg.lastBackup ? 'Last backup: ' + new Date(S.cfg.lastBackup).toLocaleString() : 'You have not made a backup yet.'}</div></div>
+    <button class="btn ${old ? 'pri' : ''}" type="button" id="sc-backup">Back up first, then set</button>
+    <button class="btn ${old ? '' : 'pri'}" type="button" id="sc-go">Set without a new backup</button>
+    <button class="btn" type="button" id="sc-x">Cancel</button></form>`;
+  document.body.appendChild(d);
+  const close = () => { d.close(); d.remove(); };
+  const msg = () => { $('#sc-msg', d).textContent = `Set "${nm('cases', $('#sc-case', d).value)}" on ${blanks().length} group${blanks().length === 1 ? '' : 's'} that have no case?`; };
+  const apply = async () => {
+    const cid = $('#sc-case', d).value; let n = 0;
+    for (const g of blanks()) { await put('groups', { ...g, caseId: cid }); n++; } // re-read at click time: never overwrites
+    close(); toast(`Case set on ${n} group${n === 1 ? '' : 's'}`); render();
+  };
+  $('#sc-case', d).onchange = msg; msg();
+  $('#sc-x', d).onclick = close;
+  $('#sc-go', d).onclick = apply;
+  $('#sc-backup', d).onclick = async () => { await exportData(); await apply(); };
+  d.addEventListener('cancel', () => setTimeout(() => d.remove(), 0));
+  d.showModal();
 }
 
 /* Issue fields shared by the rifle and pistol group forms. Turning Issue on sets Include to N and locks it; turning it off leaves Include at N, unlocked. */
@@ -1027,6 +1067,7 @@ function viewGroupFormPistol(rid, gid, fromId, sid) {
     .map((x) => `<option value="${x.id}"${x.id === curSid ? ' selected' : ''}>${esc(sessionLabel(x))} · ${fin(x.fouling) ? x.fouling : 0} fouling</option>`).join('');
   const bLabel = (x) => x.name + (fin(x.weight) ? ' ' + x.weight + ' gn' : '');
   const filtered = bulletsFor(rid, src.bulletId);
+  const caseSel = g0 ? (g0.caseId || '') : lastCase(rid); // a new group starts with the case last used on this firearm (editable)
   const n0 = g0 ? g0.shots.length : (src.shots && src.shots.length ? src.shots.length : 10);
   const vals = Array.from({ length: Math.max(n0, 30) }, (_, i) => (g0 && g0.shots[i] && fin(g0.shots[i].v) ? String(g0.shots[i].v) : ''));
   const sec = (t) => `<h2 style="color:var(--accent-text);border-color:var(--accent-text)">${t}</h2>`;
@@ -1044,6 +1085,7 @@ function viewGroupFormPistol(rid, gid, fromId, sid) {
     <div class="f"><label class="lbl" for="f-powder">Powder</label><select class="in" id="f-powder">${opts(S.powders, src.powderId, (x) => x.name)}</select></div>
     <div class="grid2">${fld('f-charge', 'Charge (gn)', src.charge)}${fld('f-coal', 'COAL (in)', src.coal)}</div>
     <div class="f"><label class="lbl" for="f-primer">Primer</label><select class="in" id="f-primer">${opts(S.primers, src.primerId, (x) => x.name)}</select></div>
+    <div class="f"><label class="lbl" for="f-case">Case · optional</label><select class="in" id="f-case">${opts(S.cases, caseSel, (x) => x.name, '— none —')}</select></div>
     ${fld('f-dist', 'Distance (yards)', fin(src.distance) ? src.distance : 25)}
     ${sec('GROUP')}
     ${fld('f-size', 'Group size (manual, outside-to-outside)', g0 && fin(g0.groupSize) ? g0.groupSize : '')}
@@ -1104,7 +1146,7 @@ async function saveGroupPistol(rid, gid, g0, shots) {
     bulletId: $('#f-bullet').value, powderId: $('#f-powder').value, primerId: $('#f-primer').value,
     charge, coal, distance, groupSize: size,
     ...issueRead(), include: issueRead().issue ? false : $('input[name=inc]:checked').value === '1', reference: $('input[name=ref]:checked').value === '1',
-    notes: $('#f-notes').value.trim(), shots
+    caseId: ($('#f-case') && $('#f-case').value) || '', notes: $('#f-notes').value.trim(), shots
   };
   if (!g.bulletId || !g.powderId || !g.primerId) return toast('Pick bullet, powder and primer');
   await put('groups', g);
@@ -1125,6 +1167,7 @@ function viewGroupForm(rid, gid, fromId, sid) {
     .map((x) => `<option value="${x.id}"${x.id === curSid ? ' selected' : ''}>${esc(sessionLabel(x))} · ${fin(x.fouling) ? x.fouling : 0} fouling</option>`).join('');
   const bLabel = (x) => x.name + (fin(x.weight) ? ' ' + x.weight + ' gn' : '');
   const filtered = bulletsFor(rid, src.bulletId);
+  const caseSel = g0 ? (g0.caseId || '') : lastCase(rid); // a new group starts with the case last used on this firearm (editable)
   const nShots = g0 ? g0.shots.length : 5;
   const sec = (t) => `<h2 style="color:var(--accent-text);border-color:var(--accent-text)">${t}</h2>`;
   const fld = (id, label, val, cls = 'm', extra = '') => `<div class="f"><label class="lbl" for="${id}">${label}</label><input class="in ${cls}" id="${id}" type="text" ${cls === 'm' ? 'inputmode="decimal"' : ''} value="${esc(val ?? '')}" autocomplete="off" ${extra}></div>`;
@@ -1142,6 +1185,7 @@ function viewGroupForm(rid, gid, fromId, sid) {
     <div class="grid2">${fld('f-charge', 'Charge (gn)', src.charge)}${fld('f-jump', 'Jump (thou off lands)', src.jump)}</div>
     ${fld('f-dist', 'Distance (yards)', fin(src.distance) ? src.distance : 100)}
     <div class="f"><label class="lbl" for="f-primer">Primer</label><select class="in" id="f-primer">${opts(S.primers, src.primerId, (x) => x.name)}</select></div>
+    <div class="f"><label class="lbl" for="f-case">Case · optional</label><select class="in" id="f-case">${opts(S.cases, caseSel, (x) => x.name, '— none —')}</select></div>
     <div class="grid2">${fld('f-coal', 'COAL (in) · optional', src.coal)}${fld('f-trim', 'Trimmed case (in) · opt.', src.trim)}</div>
     ${sec('FLAGS')}
     <div class="grid2"><div class="f"><span class="lbl">Include in analysis</span>${yn('inc', g0 ? g0.include !== false : true)}</div>
@@ -1206,7 +1250,7 @@ async function saveGroup(rid, gid, g0) {
     bulletId: $('#f-bullet').value, powderId: $('#f-powder').value, primerId: $('#f-primer').value,
     charge, jump, distance, coal: num($('#f-coal').value), trim: num($('#f-trim').value),
     ...issueRead(), include: issueRead().issue ? false : $('input[name=inc]:checked').value === '1', reference: $('input[name=ref]:checked').value === '1',
-    notes: $('#f-notes').value.trim(), esManual: num($('#f-esm').value), shots
+    caseId: ($('#f-case') && $('#f-case').value) || '', notes: $('#f-notes').value.trim(), esManual: num($('#f-esm').value), shots
   };
   if (!g.bulletId || !g.powderId || !g.primerId) return toast('Pick bullet, powder and primer');
   await put('groups', g);
@@ -1286,7 +1330,7 @@ const LIBS = {
     { k: 'type', label: 'Type', list: ['Large Rifle', 'Large Rifle Magnum', 'Small Rifle', 'Small Rifle Magnum', 'Large Pistol', 'Large Pistol Magnum', 'Small Pistol', 'Small Pistol Magnum'] }],
   cases: [{ k: 'name', label: 'Manufacturer / name', req: true }]
 };
-const USE = { bullets: 'bulletId', powders: 'powderId', primers: 'primerId' };
+const USE = { bullets: 'bulletId', powders: 'powderId', primers: 'primerId', cases: 'caseId' };
 function libForm(s, x) {
   formDialog(x ? 'Edit' : 'Add', LIBS[s].map((f) => (f.k === 'caliberId' ? { ...f, opts: calOpts() } : f)), x || (s === 'bullets' ? { diameter: 0.308 } : {}), async (v) => { await put(s, { ...(x || { id: uid() }), ...v }); },
     x ? async () => {
@@ -1383,6 +1427,7 @@ document.addEventListener('click', (e) => {
   else if (a === 'go') { if (!e.target.closest('a')) location.hash = t.dataset.href; }
   else if (a === 'la-sort') { LA.sort = t.dataset.v; viewAllKeepScroll(); }
   else if (a === 'is-tab') { IS.tab = t.dataset.v; viewAllKeepScroll(); }
+  else if (a === 'set-case') setCaseBulk(id);
   else if (a === 'menu') { const m = $('#menu'); m.hidden = !m.hidden; t.setAttribute('aria-expanded', String(!m.hidden)); }
   else if (a === 'cr-pass') { CR.pass = Number(t.dataset.p); crSave(); viewAllKeepScroll(); window.scrollTo(0, 0); }
   else if (a === 'cr-n') {

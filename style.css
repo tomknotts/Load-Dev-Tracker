@@ -160,3 +160,6 @@ details.unproven summary{min-height:44px;display:flex;align-items:center;cursor:
 .seg3{grid-template-columns:repeat(3,minmax(0,1fr))}
 .seg3 label:not(:first-child) span{border-left:0}
 .seg3 label:nth-child(2) span{border-radius:0}
+
+/* group forms: side-by-side fields line up by their bottoms, so a label that wraps to two lines no longer pushes its box down */
+#gform .grid2{align-items:end}
