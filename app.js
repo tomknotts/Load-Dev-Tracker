@@ -1,5 +1,5 @@
 'use strict';
-const APP_VERSION = 'v17'; // keep in step with CACHE in sw.js (shown in Settings > About so you can tell which copy a browser is running)
+const APP_VERSION = 'v18'; // keep in step with CACHE in sw.js (shown in Settings > About so you can tell which copy a browser is running)
 /* ---------- helpers ---------- */
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
@@ -30,7 +30,7 @@ applyTheme();
 if (matchMedia) matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => applyTheme());
 
 /* ---------- IndexedDB (all data stays on this device) ---------- */
-const STORES = ['rifles', 'calibers', 'bullets', 'powders', 'primers', 'cases', 'sessions', 'groups', 'hist']; // exported / imported
+const STORES = ['rifles', 'calibers', 'bullets', 'powders', 'primers', 'cases', 'sessions', 'groups', 'hist', 'prefs']; // exported / imported
 const ALL_STORES = [...STORES, 'meta']; // meta = per-device settings (backup reminder), never exported
 let db;
 const S = {};
@@ -38,7 +38,7 @@ const rp = (r) => new Promise((res, rej) => { r.onsuccess = () => res(r.result);
 const store = (s, m) => db.transaction(s, m).objectStore(s);
 function openDB() {
   return new Promise((res, rej) => {
-    const r = indexedDB.open('loadtracker', 3);
+    const r = indexedDB.open('loadtracker', 4);
     r.onupgradeneeded = () => { for (const s of ALL_STORES) if (!r.result.objectStoreNames.contains(s)) r.result.createObjectStore(s, { keyPath: 'id' }); };
     r.onsuccess = () => res(r.result);
     r.onerror = () => rej(r.error);
@@ -118,7 +118,7 @@ const byId = (s, id) => S[s].find((x) => x.id === id);
 async function exportData() {
   const data = {};
   for (const s of STORES) data[s] = S[s];
-  const blob = new Blob([JSON.stringify({ app: '308-load-dev-tracker', version: 6, exported: new Date().toISOString(), data }, null, 2)], { type: 'application/json' });
+  const blob = new Blob([JSON.stringify({ app: '308-load-dev-tracker', version: 7, exported: new Date().toISOString(), data }, null, 2)], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = `load-dev-backup-${today()}.json`;
@@ -271,6 +271,60 @@ const flagBadge = (c) => (comboFlagged(c) ? '<span class="tag r">Issue on this l
 const flagLine = (f) => `<a href="#/group/${f.id}" style="display:block;color:inherit"><b>${f.charge} gn · ${esc(f.issueCategory || 'Issue')}</b> — applies to ${SCOPE_TEXT[f.issueScope || 'exact']}${f.issueNote ? `<div class="muted" style="color:inherit">${esc(f.issueNote)}</div>` : ''}<div class="muted" style="color:inherit">${esc(gdate(f))} · ${esc(bl(f.bulletId))} · ${esc(nm('powders', f.powderId))} · ${esc(nm('primers', f.primerId))} · ${isPistol(f.rifleId) ? 'COAL ' + f.coal + '"' : f.jump + ' thou'}</div></a>`;
 const issueBox = (g) => (g.issue === true ? `<div class="card flagbox"><div class="lbl" style="color:inherit">Issue logged on this group</div><b>${esc(g.issueCategory || 'No category')}</b><div>Applies to ${SCOPE_TEXT[g.issueScope || 'exact']}</div>${g.issueNote ? `<div>${esc(g.issueNote)}</div>` : ''}</div>` : '');
 
+/* ---------- Cost (display only: never feeds pooling, ranking, best load, issue flags or any statistic) ----------
+   Prices are entered before tax. Per unit: (price + shipping and fees) x (1 + tax) / quantity.
+   Powder is cost per grain (7000 gr/lb, 15432.36 gr/kg) x the charge; a case is cost per firing (/ quantity / loads per case, default 10).
+   A price of 0 is valid (free brass). Anything blank is "missing" and is never treated as zero. No price history is stored. */
+const GR_PER_LB = 7000, GR_PER_KG = 15432.36;
+const costPrefs = () => S.prefs.find((p) => p.id === 'cost') || { id: 'cost', tax: 12, currency: 'CAD' };
+const taxPct = () => (fin(costPrefs().tax) && costPrefs().tax >= 0 ? costPrefs().tax : 12);
+const curLabel = () => costPrefs().currency || 'CAD';
+const money = (n, d = 3) => (fin(n) ? '$' + n.toFixed(d) : '—');
+const hasNum = (v) => v !== null && v !== undefined && v !== '' && Number.isFinite(Number(v));
+function unitPre(kind, it, charge) { // before-tax cost of one bullet / one primer / one firing of a case / `charge` grains of powder; null = missing
+  if (!it || !hasNum(it.price)) return null;
+  const total = Number(it.price) + (hasNum(it.ship) ? Number(it.ship) : 0);
+  if (kind === 'powder') {
+    const pkg = Number(it.pkg);
+    if (!(pkg > 0) || !hasNum(charge)) return null;
+    return total / (pkg * (it.unit === 'kg' ? GR_PER_KG : GR_PER_LB)) * Number(charge);
+  }
+  const qty = Number(it.qty);
+  if (!(qty > 0)) return null;
+  if (kind === 'case') return total / qty / (hasNum(it.loads) && Number(it.loads) > 0 ? Number(it.loads) : 10);
+  return total / qty;
+}
+function loadCost(parts) { // parts: { bullet, powder, primer, brass, charge }
+  const rate = taxPct() / 100;
+  const pre = { bullet: unitPre('bullet', parts.bullet), powder: unitPre('powder', parts.powder, parts.charge), primer: unitPre('primer', parts.primer), brass: unitPre('case', parts.brass) };
+  const missing = Object.keys(pre).filter((k) => pre[k] === null);
+  const sumPre = Object.keys(pre).reduce((a, k) => a + (pre[k] ?? 0), 0);
+  return { pre, missing, incomplete: missing.length > 0, none: missing.length === 4, sumPre, tax: sumPre * rate, total: sumPre * (1 + rate) };
+}
+const COST_NAMES = { bullet: 'Bullet', powder: 'Powder', primer: 'Primer', brass: 'Brass' };
+function costLines(L, why = {}) {
+  return ['bullet', 'powder', 'primer', 'brass'].map((k) => `<div class="kv"><span>${COST_NAMES[k]}${L.pre[k] === null && why[k] ? ' <small style="display:inline">(' + esc(why[k]) + ')</small>' : ''}</span><b>${L.pre[k] === null ? '<span style="color:var(--amber)">missing</span>' : money(L.pre[k])}</b></div>`).join('')
+    + `<div class="kv"><span>Tax (${taxPct()}%)</span><b>${L.none ? '—' : money(L.tax)}</b></div>`;
+}
+// small cost block for a group page
+function costCard(g) {
+  const L = loadCost({ bullet: byId('bullets', g.bulletId), powder: byId('powders', g.powderId), primer: byId('primers', g.primerId), brass: g.caseId ? byId('cases', g.caseId) : null, charge: g.charge });
+  const why = { brass: g.caseId ? 'no price' : 'no case set' };
+  return `<div class="card"><div class="row sb"><div class="lbl">Cost per round</div><b class="mono">${L.none ? '—' : money(L.total)}${L.incomplete ? ' · incomplete' : ''}</b></div>
+    ${costLines(L, why)}
+    <div class="muted">Before tax, then tax. Informational only. ${L.incomplete ? 'Missing lines are left out of the total, not counted as zero.' : ''} ${esc(curLabel())}</div></div>`;
+}
+function costLive(kind, v) { // sanity-check line shown inside the library edit dialog
+  const rate = 1 + taxPct() / 100;
+  if (kind === 'powders') {
+    const p = unitPre('powder', v, 1);
+    return p === null ? 'Cost per grain: missing price or package size' : `With tax: $${(p * rate).toFixed(5)} per grain · $${(p * rate * 10).toFixed(4)} per 10 gr`;
+  }
+  const k = { bullets: 'bullet', primers: 'primer', cases: 'case' }[kind], lab = { bullet: 'per bullet', primer: 'per primer', case: 'per firing' }[k];
+  const p = unitPre(k, v);
+  return p === null ? `Cost ${lab}: missing price or quantity` : `With tax (${taxPct()}%): $${(p * rate).toFixed(4)} ${lab}`;
+}
+
 /* ---------- UI plumbing ---------- */
 // With rid, the middle of the bar shows the rifle name (tap = that rifle's main page) and the page name underneath.
 const bar = (left, title, right = '', rid = null) => {
@@ -321,16 +375,22 @@ let F = { rid: null, powder: '', bullet: '', primer: '', charge: '', jump: '' };
 const multiField = (f, vals) => `<div class="f" id="d-${f.k}"><span class="lbl">${esc(f.label)}</span>${f.opts.length
   ? f.opts.map((o) => `<label class="row" style="min-height:44px"><input type="checkbox" name="m-${f.k}" value="${esc(o[0])}"${(vals[f.k] || []).includes(o[0]) ? ' checked' : ''} style="width:24px;height:24px"> ${esc(o[1])}</label>`).join('')
   : `<div class="muted">${esc(f.empty || 'Nothing to pick yet.')}</div>`}</div>`;
-function formDialog(title, fields, vals, onSave, onDelete) {
+function formDialog(title, fields, vals, onSave, onDelete, live) {
   const d = document.createElement('dialog');
   d.innerHTML = `<form method="dialog"><h1 style="font-size:22px">${esc(title)}</h1>
     ${fields.map((f) => f.type === 'multi' ? multiField(f, vals) : `<div class="f"><label class="lbl" for="d-${f.k}">${esc(f.label)}</label>${
       f.type === 'select'
         ? `<select class="in" id="d-${f.k}"${f.disabled ? ' disabled' : ''}>${f.opts.map((o) => `<option value="${esc(o[0])}"${o[0] === vals[f.k] ? ' selected' : ''}>${esc(o[1])}</option>`).join('')}</select>`
         : `<input class="in ${f.type === 'num' ? 'm' : ''}" id="d-${f.k}" type="text" ${f.type === 'num' ? 'inputmode="decimal"' : ''} ${f.list ? `list="dl-${f.k}"` : ''} value="${esc(vals[f.k] ?? '')}" autocomplete="off">${f.list ? `<datalist id="dl-${f.k}">${f.list.map((o) => `<option value="${esc(o)}">`).join('')}</datalist>` : ''}`}</div>`).join('')}
+    ${live ? '<div id="d-live" class="card muted"></div>' : ''}
     <div class="grid2"><button class="btn pri" value="ok">Save</button><button class="btn" value="cancel" type="button" id="d-x">Cancel</button></div>
     ${onDelete ? '<button class="btn danger sm" type="button" id="d-del">Delete</button>' : ''}</form>`;
   document.body.appendChild(d);
+  if (live) { // a line that recalculates as you type (used for the cost sanity check)
+    const readNow = () => { const o = {}; for (const f of fields) { if (f.type === 'multi') continue; const el = $('#d-' + f.k, d); const raw = el ? el.value.trim() : ''; o[f.k] = f.type === 'num' ? num(raw) : raw; } return o; };
+    const upd = () => { $('#d-live', d).textContent = live(readNow()); };
+    $('form', d).addEventListener('input', upd); $('form', d).addEventListener('change', upd); upd();
+  }
   const close = () => { d.close(); d.remove(); };
   $('#d-x', d).onclick = close;
   d.addEventListener('cancel', () => setTimeout(() => d.remove(), 0));
@@ -777,9 +837,74 @@ function viewLoadCheck() {
     <div class="f"><label class="lbl" for="lc-primer">Primer · optional</label><select class="in" id="lc-primer">${opts(S.primers, LC.primer, (x) => x.name, 'Any primer')}</select></div>
     <div id="lc-out">${lcResult()}</div>`);
 }
+/* Load Cost Calculator: one bullet, one primer, one case per round, plus a powder charge. Each part comes from the library or is entered manually. */
+const CC_STORE = { bullet: 'bullets', powder: 'powders', primer: 'primers', case: 'cases' };
+const CC_FIELDS = {
+  bullet: [['price', 'Price ($, before tax)'], ['qty', 'Quantity in the box'], ['ship', 'Shipping and fees ($)']],
+  primer: [['price', 'Price ($, before tax)'], ['qty', 'Quantity in the box'], ['ship', 'Shipping and fees ($)']],
+  powder: [['price', 'Price ($, before tax)'], ['pkg', 'Package size'], ['unit', 'unit'], ['ship', 'Shipping and fees ($)']],
+  case: [['price', 'Price ($, before tax; 0 = free)'], ['qty', 'Quantity'], ['loads', 'Loads per case (blank = 10)'], ['ship', 'Shipping and fees ($)']]
+};
+const MAN = '__manual__';
+let CC = { rid: '', bullet: '', powder: '', primer: '', case: '', charge: '', all: false, m: { bullet: {}, powder: { unit: 'lb' }, primer: {}, case: { loads: '10' } } };
+const ccItem = (kind) => {
+  if (CC[kind] === MAN) { const m = CC.m[kind]; return { price: num(m.price), qty: num(m.qty), pkg: num(m.pkg), unit: m.unit || 'lb', loads: num(m.loads), ship: num(m.ship) }; }
+  return CC[kind] ? byId(CC_STORE[kind], CC[kind]) : null;
+};
+function ccResult() {
+  if (!CC.bullet && !CC.powder && !CC.primer && !CC.case) return '<div class="muted">Pick a bullet, powder, primer and case, or choose Manual to type in prices.</div>';
+  const L = loadCost({ bullet: ccItem('bullet'), powder: ccItem('powder'), primer: ccItem('primer'), brass: ccItem('case'), charge: num(CC.charge) });
+  const why = { bullet: !CC.bullet ? 'not picked' : '', powder: !CC.powder ? 'not picked' : num(CC.charge) === null ? 'enter a charge' : '', primer: !CC.primer ? 'not picked' : '', brass: !CC.case ? 'not picked' : '' };
+  const per = (n) => (L.none ? '—' : money(L.total * n, 2));
+  return `<div class="card"><div class="row sb"><div class="lbl">Cost per round</div><b class="mono" style="font-size:24px">${L.none ? '—' : money(L.total)}${L.incomplete ? ' · incomplete' : ''}</b></div>
+    <div class="grid3"><div><div class="lbl">Per 20</div><span class="mono v">${per(20)}</span></div><div><div class="lbl">Per 50</div><span class="mono v">${per(50)}</span></div><div><div class="lbl">Per 100</div><span class="mono v">${per(100)}</span></div></div>
+    ${costLines(L, why)}
+    <div class="kv"><span><b>Total</b>${L.incomplete ? ' (incomplete)' : ''}</span><b>${L.none ? '—' : money(L.total)}</b></div>
+    <div class="muted">${esc(curLabel())} · prices before tax, tax added at ${taxPct()}%. Missing lines are left out of the total, not counted as zero.</div></div>`;
+}
+function ccManualHtml(kind) {
+  const m = CC.m[kind];
+  return `<div class="card" id="ccm-${kind}">${CC_FIELDS[kind].map(([k, label]) => (k === 'unit'
+    ? `<div class="f"><label class="lbl" for="cc-m-${kind}-unit">Package unit</label><select class="in" id="cc-m-${kind}-unit"><option value="lb"${m.unit !== 'kg' ? ' selected' : ''}>lb</option><option value="kg"${m.unit === 'kg' ? ' selected' : ''}>kg</option></select></div>`
+    : `<div class="f"><label class="lbl" for="cc-m-${kind}-${k}">${label}</label><input class="in m" id="cc-m-${kind}-${k}" inputmode="decimal" value="${esc(m[k] ?? '')}"></div>`)).join('')}
+    <button class="btn sm" data-act="cc-save" data-v="${kind}">Save to library</button></div>`;
+}
+function viewCostCalc() {
+  bar(back('#/tools', 'Tools', true), 'Load cost');
+  if (CC.rid && !byId('rifles', CC.rid)) CC.rid = '';
+  const caseList = CC.rid && !CC.all ? casesFor(CC.rid, CC.case) : S.cases;
+  const sel = (kind, label, list, extra = '') => `<div class="f"><label class="lbl" for="cc-${kind}">${label}</label><select class="in" id="cc-${kind}">${opts(list, CC[kind], (x) => x.name + (kind === 'bullet' && fin(x.weight) ? ' ' + x.weight + ' gn' : ''), '— pick —')}<option value="${MAN}"${CC[kind] === MAN ? ' selected' : ''}>Manual…</option></select>${extra}</div>${CC[kind] === MAN ? ccManualHtml(kind) : ''}`;
+  const loads = CC.rid ? (() => { const m = new Map(); for (const g of S.groups.filter((x) => x.rifleId === CC.rid).sort((a, b) => b.ts - a.ts)) { const k = [g.bulletId, g.powderId, Number(g.charge), g.primerId].join('|'); if (!m.has(k)) m.set(k, g); } return [...m.entries()]; })() : [];
+  main(`<h1>Load cost</h1>
+    <div class="muted">Cost per round from your library prices (before tax, plus tax). One bullet, one primer and one case per round. Display only: nothing here affects your data or rankings.</div>
+    <div class="f"><label class="lbl" for="cc-rid">Firearm · optional (filters the case list, enables the shortcut)</label><select class="in" id="cc-rid">${opts(S.rifles, CC.rid, (x) => x.name, 'No firearm')}</select></div>
+    ${CC.rid && loads.length ? `<div class="f"><label class="lbl" for="cc-fill">Fill from a logged load</label><select class="in" id="cc-fill"><option value="">— pick a load —</option>${loads.map(([k, g]) => `<option value="${esc(k)}">${esc(bl(g.bulletId))} · ${esc(nm('powders', g.powderId))} ${g.charge} gn · ${esc(nm('primers', g.primerId))}</option>`).join('')}</select></div>` : ''}
+    ${sel('bullet', 'Bullet', S.bullets)}
+    ${sel('powder', 'Powder', S.powders)}
+    <div class="f"><label class="lbl" for="cc-charge">Charge (gn)</label><input class="in m" id="cc-charge" inputmode="decimal" value="${esc(CC.charge)}"></div>
+    ${sel('primer', 'Primer', S.primers)}
+    ${sel('case', 'Case', caseList, CC.rid && caseList.length < S.cases.length ? '<div class="muted"><label style="text-decoration:underline"><input type="checkbox" id="cc-allcase"> show all cases</label></div>' : (CC.rid && CC.all ? '<div class="muted"><label style="text-decoration:underline"><input type="checkbox" id="cc-allcase" checked> show all cases</label></div>' : ''))}
+    <div id="cc-out">${ccResult()}</div>`);
+}
+function ccSave(kind) { // turn a manual entry into a library item (needs a name; a bullet also needs a diameter)
+  const m = CC.m[kind], store = CC_STORE[kind];
+  const fields = [{ k: 'name', label: 'Name for the library', req: true }];
+  if (kind === 'bullet') fields.push({ k: 'weight', label: 'Weight (gn) · optional', type: 'num' }, { k: 'diameter', label: 'Diameter (in)', type: 'num', req: true });
+  formDialog('Save to library', fields, kind === 'bullet' ? { diameter: 0.308 } : {}, async (v) => {
+    const item = { id: uid(), name: v.name, price: num(m.price), qty: num(m.qty), ship: num(m.ship) };
+    if (kind === 'powder') { item.pkg = num(m.pkg); item.unit = m.unit || 'lb'; delete item.qty; }
+    if (kind === 'case') item.loads = num(m.loads);
+    if (kind === 'bullet') { item.weight = v.weight; item.diameter = v.diameter; }
+    await put(store, item);
+    CC[kind] = item.id; CC.m[kind] = kind === 'powder' ? { unit: 'lb' } : kind === 'case' ? { loads: '10' } : {};
+    toast('Saved to library');
+  });
+}
 function viewTools() {
   bar(back('#/', 'Firearms', true), 'Tools');
   main(`<h1>Tools</h1>
+    <a class="card" href="#/tools/cost"><div class="row sb"><b>Load cost</b><span aria-hidden="true">→</span></div>
+      <div class="muted">Cost per round, per 20, 50 and 100 from your library prices, with tax.</div></a>
     <a class="card" href="#/tools/loadcheck"><div class="row sb"><b>Load check</b><span aria-hidden="true">→</span></div>
       <div class="muted">Before you build a load: see whether it matches an issue you logged (too hot, too weak, short stroke...).</div></a>
     <a class="card" href="#/tools/crimp"><div class="row sb"><b>Crimp test</b><span aria-hidden="true">→</span></div>
@@ -932,6 +1057,7 @@ function viewGroupPistol(g) {
       <div class="kv"><span>Session fouling shots</span><b>${fin(se.fouling) ? se.fouling : 0}</b></div>
       <div class="kv"><span>Rounds since clean (at start of group)</span><b>${roundsSinceClean(g) ?? '—'}</b></div></a>
       <button class="btn sm" data-act="edit-session" data-id="${g.sessionId}">Edit session</button></div>
+    ${costCard(g)}
     <div class="card"><div class="lbl">Shots</div><table><thead><tr><th>#</th><th>Velocity (fps)</th></tr></thead><tbody>
       ${g.shots.map((p, i) => `<tr><td>${i + 1}</td><td>${fin(p.v) ? p.v : '—'}</td></tr>`).join('')}</tbody></table></div>
     ${g.notes ? `<div class="card"><div class="lbl">Notes</div>${esc(g.notes)}</div>` : ''}
@@ -976,6 +1102,7 @@ function viewGroup(gid) {
       <div class="kv"><span>Rounds since clean (at start of group)</span><b>${roundsSinceClean(g) ?? '—'}</b></div></a>
       <div class="kv"><span>COAL / trimmed length</span><b>${fin(g.coal) ? g.coal : '—'} / ${fin(g.trim) ? g.trim : '—'}</b></div>
       <button class="btn sm" data-act="edit-session" data-id="${g.sessionId}">Edit session</button></div>
+    ${costCard(g)}
     <div class="card"><div class="lbl">Shots</div><table><thead><tr><th>#</th><th>Vel</th><th>X</th><th>Y</th><th>Rad</th></tr></thead><tbody>
       ${g.shots.map((p, i) => `<tr><td>${i + 1}</td><td>${fin(p.v) ? p.v : '—'}</td><td>${sfmt(p.x)}</td><td>${sfmt(p.y)}</td><td>${fin(p.x) && fin(p.y) && s.cx !== null ? fmt(Math.hypot(p.x - s.cx, p.y - s.cy)) : '—'}</td></tr>`).join('')}</tbody></table></div>
     ${g.notes ? `<div class="card"><div class="lbl">Notes</div>${esc(g.notes)}</div>` : ''}
@@ -1327,6 +1454,10 @@ function viewSettings() {
     <div class="lbl">Accent color</div>
     <div class="grid3">${[['green', 'Green', '#3f5b2e'], ['blue', 'Blue', '#0b4f9c'], ['orange', 'Orange', '#c2560c']].map(([v, l, c]) => `<button class="btn ${accentPref() === v ? 'pri' : ''}" data-act="accent" data-v="${v}" aria-pressed="${accentPref() === v}"><span class="swatch" style="background:${c}"></span>${l}</button>`).join('')}</div>
     <div class="muted">Auto follows your phone's light or dark setting. Theme and accent are saved on this device only.</div>
+    <h2>COST</h2>
+    <div class="grid2"><div class="f"><label class="lbl" for="cost-tax">Tax rate (%)</label><input class="in m" id="cost-tax" inputmode="decimal" value="${taxPct()}"></div>
+    <div class="f"><label class="lbl" for="cost-cur">Currency label</label><input class="in" id="cost-cur" value="${esc(curLabel())}" maxlength="6"></div></div>
+    <div class="muted">Applies to every price you enter in the libraries (prices are before tax). The label is display only. Changing a price or the tax rate changes every load's cost everywhere, and no price history is kept.</div>
     <h2>PREFERENCES</h2>
     <div class="f"><label class="lbl" for="pref-dist">Main-screen best load distance (yards)</label><input class="in m" id="pref-dist" inputmode="numeric" value="${bestDist()}"></div>
     <div class="muted">The firearm page shows the best rifle load at this distance. Every distance is on the Best Loads page.</div>
@@ -1362,16 +1493,20 @@ const LIBS = {
   bullets: [{ k: 'name', label: 'Manufacturer / name', req: true },
     { k: 'caliberId', label: 'Caliber (add calibers in Settings)', type: 'select', opts: [] },
     { k: 'style', label: 'Style (bullet shape)', list: ['BTHP', 'BT', 'SP', 'SPBT', 'FMJ', 'FMJBT', 'HP', 'RN', 'SWC', 'Hybrid'] },
-    { k: 'weight', label: 'Weight (gn)', type: 'num' }, { k: 'diameter', label: 'Diameter (in)', type: 'num', req: true }],
+    { k: 'weight', label: 'Weight (gn)', type: 'num' }, { k: 'diameter', label: 'Diameter (in)', type: 'num', req: true },
+    { k: 'price', label: 'Price ($, before tax) · optional', type: 'num' }, { k: 'qty', label: 'Quantity in the box', type: 'num' }, { k: 'ship', label: 'Shipping and fees for this purchase ($)', type: 'num' }],
   calibers: [{ k: 'name', label: 'Caliber name (e.g. .308 Win, 7mm Rem Mag, .45 ACP)', req: true }],
-  powders: [{ k: 'name', label: 'Name', req: true }],
+  powders: [{ k: 'name', label: 'Name', req: true },
+    { k: 'price', label: 'Price ($, before tax) · optional', type: 'num' }, { k: 'pkg', label: 'Package size', type: 'num' }, { k: 'unit', label: 'Package unit', type: 'select', opts: [['lb', 'lb'], ['kg', 'kg']] }, { k: 'ship', label: 'Shipping and fees for this purchase ($)', type: 'num' }],
   primers: [{ k: 'name', label: 'Brand / name', req: true },
-    { k: 'type', label: 'Type', list: ['Large Rifle', 'Large Rifle Magnum', 'Small Rifle', 'Small Rifle Magnum', 'Large Pistol', 'Large Pistol Magnum', 'Small Pistol', 'Small Pistol Magnum'] }],
-  cases: [{ k: 'name', label: 'Manufacturer / name', req: true }, { k: 'caliberIds', label: 'Calibers (optional, pick any)', type: 'multi', opts: [], empty: 'Add calibers in Settings to tag cases.' }]
+    { k: 'type', label: 'Type', list: ['Large Rifle', 'Large Rifle Magnum', 'Small Rifle', 'Small Rifle Magnum', 'Large Pistol', 'Large Pistol Magnum', 'Small Pistol', 'Small Pistol Magnum'] },
+    { k: 'price', label: 'Price ($, before tax) · optional', type: 'num' }, { k: 'qty', label: 'Quantity in the box', type: 'num' }, { k: 'ship', label: 'Shipping and fees for this purchase ($)', type: 'num' }],
+  cases: [{ k: 'name', label: 'Manufacturer / name', req: true }, { k: 'caliberIds', label: 'Calibers (optional, pick any)', type: 'multi', opts: [], empty: 'Add calibers in Settings to tag cases.' },
+    { k: 'price', label: 'Price ($, before tax) · optional (0 = free brass)', type: 'num' }, { k: 'qty', label: 'Quantity', type: 'num' }, { k: 'loads', label: 'Expected loads per case (blank = 10)', type: 'num' }, { k: 'ship', label: 'Shipping and fees for this purchase ($)', type: 'num' }]
 };
 const USE = { bullets: 'bulletId', powders: 'powderId', primers: 'primerId', cases: 'caseId' };
 function libForm(s, x) {
-  formDialog(x ? 'Edit' : 'Add', LIBS[s].map((f) => (f.k === 'caliberId' ? { ...f, opts: calOpts() } : f.k === 'caliberIds' ? { ...f, opts: calOpts().filter((o) => o[0]) } : f)), x || (s === 'bullets' ? { diameter: 0.308 } : {}), async (v) => { await put(s, { ...(x || { id: uid() }), ...v }); },
+  formDialog(x ? 'Edit' : 'Add', LIBS[s].map((f) => (f.k === 'caliberId' ? { ...f, opts: calOpts() } : f.k === 'caliberIds' ? { ...f, opts: calOpts().filter((o) => o[0]) } : f)), x || (s === 'bullets' ? { diameter: 0.308 } : s === 'cases' ? { loads: 10 } : {}), async (v) => { await put(s, { ...(x || { id: uid() }), ...v }); },
     x ? async () => {
       if (USE[s] && S.groups.some((g) => g[USE[s]] === x.id)) { toast('In use by logged groups — cannot delete'); return false; }
       if (s === 'calibers') { // blocked while anything uses it; the message says what
@@ -1383,7 +1518,7 @@ function libForm(s, x) {
       }
       if (!confirm('Delete this item?')) return false;
       await del(s, x.id); return true;
-    } : null);
+    } : null, ['bullets', 'powders', 'primers', 'cases'].includes(s) ? (v) => costLive(s, v) : null);
 }
 
 /* ---------- router & events ---------- */
@@ -1396,7 +1531,7 @@ function render() {
     if (!p.length) viewHome();
     else if (p[0] === 'rifle') viewRifle(p[1]);
     else if (p[0] === 'all') viewAll(p[1]);
-    else if (p[0] === 'tools') { if (p[1] === 'crimp') viewCrimp(); else if (p[1] === 'loadcheck') viewLoadCheck(); else viewTools(); }
+    else if (p[0] === 'tools') { if (p[1] === 'crimp') viewCrimp(); else if (p[1] === 'loadcheck') viewLoadCheck(); else if (p[1] === 'cost') viewCostCalc(); else viewTools(); }
     else if (p[0] === 'issues') viewIssues(p[1]);
     else if (p[0] === 'best') viewBest(p[1]);
     else if (p[0] === 'load') viewLoad(p[1]);
@@ -1472,6 +1607,7 @@ document.addEventListener('click', (e) => {
   else if (a === 'go') { if (!e.target.closest('a')) location.hash = t.dataset.href; }
   else if (a === 'la-sort') { LA.sort = t.dataset.v; viewAllKeepScroll(); }
   else if (a === 'is-tab') { IS.tab = t.dataset.v; viewAllKeepScroll(); }
+  else if (a === 'cc-save') ccSave(t.dataset.v);
   else if (a === 'set-case') setCaseBulk(id);
   else if (a === 'menu') { const m = $('#menu'); m.hidden = !m.hidden; t.setAttribute('aria-expanded', String(!m.hidden)); }
   else if (a === 'cr-pass') { CR.pass = Number(t.dataset.p); crSave(); viewAllKeepScroll(); window.scrollTo(0, 0); }
@@ -1501,6 +1637,16 @@ document.addEventListener('input', (e) => {
     const row = e.target.closest('.crrow');
     CR.vals[crKey(row.dataset.p, row.dataset.r)] = e.target.value.trim();
     crSave(); crRefresh();
+  } else if (e.target.id && e.target.id.startsWith('cc-') && e.target.id !== 'cc-allcase') { // Load cost calculator
+    const id = e.target.id, v = e.target.value;
+    if (id === 'cc-rid') { CC.rid = v; CC.all = false; viewAllKeepScroll(); }
+    else if (id === 'cc-fill') {
+      const g = v && S.groups.filter((x) => x.rifleId === CC.rid && [x.bulletId, x.powderId, Number(x.charge), x.primerId].join('|') === v).sort((a, b) => b.ts - a.ts)[0];
+      if (g) { CC.bullet = g.bulletId; CC.powder = g.powderId; CC.primer = g.primerId; CC.charge = String(g.charge); CC.case = g.caseId && byId('cases', g.caseId) ? g.caseId : ''; viewAllKeepScroll(); }
+    }
+    else if (id === 'cc-charge') { CC.charge = v.trim(); const o = $('#cc-out'); if (o) o.innerHTML = ccResult(); }
+    else if (id.startsWith('cc-m-')) { const [, , kind, field] = id.split('-'); CC.m[kind][field] = v.trim(); const o = $('#cc-out'); if (o) o.innerHTML = ccResult(); }
+    else { const kind = id.slice(3); if (CC_STORE[kind]) { CC[kind] = v; viewAllKeepScroll(); } }
   } else if (e.target.id && e.target.id.startsWith('lc-')) { // Load check: patch the result in place so typing keeps focus
     LC[e.target.id.slice(3).replace('rid', 'rid')] = e.target.value.trim();
     if (e.target.id === 'lc-rid') viewAllKeepScroll(); else { const o = $('#lc-out'); if (o) o.innerHTML = lcResult(); }
@@ -1535,6 +1681,11 @@ document.addEventListener('change', (e) => {
   if (e.target.id === 'la-powderB') { LA.powderB = e.target.value; viewAllKeepScroll(); }
   if (e.target.id === 'la-compare') { LA.compare = e.target.checked; viewAllKeepScroll(); }
   if (e.target.id === 'la-ladderthin') { LA.ladderThin = e.target.checked; viewAllKeepScroll(); }
+  if (e.target.id === 'cost-tax' || e.target.id === 'cost-cur') {
+    const n = num($('#cost-tax').value), cur = $('#cost-cur').value.trim() || 'CAD';
+    put('prefs', { id: 'cost', tax: n !== null && n >= 0 ? n : 12, currency: cur }).then(() => { $('#cost-tax').value = taxPct(); $('#cost-cur').value = curLabel(); });
+  }
+  if (e.target.id === 'cc-allcase') { CC.all = e.target.checked; viewAllKeepScroll(); }
   if (e.target.id === 'pref-dist') {
     const n = num(e.target.value);
     S.cfg.bestDist = n !== null && n > 0 ? Math.round(n) : 100;
