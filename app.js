@@ -1,5 +1,5 @@
 'use strict';
-const APP_VERSION = 'v18'; // keep in step with CACHE in sw.js (shown in Settings > About so you can tell which copy a browser is running)
+const APP_VERSION = 'v19'; // keep in step with CACHE in sw.js (shown in Settings > About so you can tell which copy a browser is running)
 /* ---------- helpers ---------- */
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
@@ -1298,6 +1298,7 @@ async function saveGroupPistol(rid, gid, g0, shots) {
   };
   if (!g.bulletId || !g.powderId || !g.primerId) return toast('Pick bullet, powder and primer');
   await put('groups', g);
+  requestPersist(); // ask the browser to keep this data (some browsers only grant it after real use)
   if (g0 && navIdx > 0) history.back();
   else navTo('#/group/' + g.id, true);
 }
@@ -1406,6 +1407,7 @@ async function saveGroup(rid, gid, g0) {
   };
   if (!g.bulletId || !g.powderId || !g.primerId) return toast('Pick bullet, powder and primer');
   await put('groups', g);
+  requestPersist(); // ask the browser to keep this data (some browsers only grant it after real use)
   if (g0 && navIdx > 0) history.back(); // editing: return to the group page we came from (re-rendered with the new numbers)
   else navTo('#/group/' + g.id, true);
 }
@@ -1701,12 +1703,19 @@ document.addEventListener('change', (e) => {
 });
 function viewAllKeepScroll() { const y = window.scrollY; render(); window.scrollTo(0, y); }
 
+/* Ask the browser to keep this data safe from clean-up. Called at startup and again after each group save (some browsers only
+   grant it after real use). If a request is refused it is not repeated during the same visit, so there are no repeated prompts. */
+let persistRefused = false;
+function requestPersist() {
+  if (persistRefused || !(navigator.storage && navigator.storage.persist && navigator.storage.persisted)) return;
+  navigator.storage.persisted().then((p) => (p ? true : navigator.storage.persist())).then((ok) => { if (!ok) persistRefused = true; }).catch(() => {});
+}
 (async function init() {
   try {
     db = await openDB();
     await loadAll();
     await migrate();
-    if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+    requestPersist();
   } catch (e) {
     main(`<div class="card"><b>Storage unavailable.</b><div class="muted">${esc(e.message)}. This app needs IndexedDB (not private-browsing mode).</div></div>`);
     return;
