@@ -1,5 +1,5 @@
 'use strict';
-const APP_VERSION = 'v19'; // keep in step with CACHE in sw.js (shown in Settings > About so you can tell which copy a browser is running)
+const APP_VERSION = 'v20'; // keep in step with CACHE in sw.js (shown in Settings > About so you can tell which copy a browser is running)
 /* ---------- helpers ---------- */
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
@@ -30,7 +30,7 @@ applyTheme();
 if (matchMedia) matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => applyTheme());
 
 /* ---------- IndexedDB (all data stays on this device) ---------- */
-const STORES = ['rifles', 'calibers', 'bullets', 'powders', 'primers', 'cases', 'sessions', 'groups', 'hist', 'prefs']; // exported / imported
+const STORES = ['rifles', 'calibers', 'bullets', 'powders', 'primers', 'cases', 'sessions', 'groups', 'hist', 'prefs', 'ledger', 'batches']; // exported / imported
 const ALL_STORES = [...STORES, 'meta']; // meta = per-device settings (backup reminder), never exported
 let db;
 const S = {};
@@ -38,7 +38,7 @@ const rp = (r) => new Promise((res, rej) => { r.onsuccess = () => res(r.result);
 const store = (s, m) => db.transaction(s, m).objectStore(s);
 function openDB() {
   return new Promise((res, rej) => {
-    const r = indexedDB.open('loadtracker', 4);
+    const r = indexedDB.open('loadtracker', 5);
     r.onupgradeneeded = () => { for (const s of ALL_STORES) if (!r.result.objectStoreNames.contains(s)) r.result.createObjectStore(s, { keyPath: 'id' }); };
     r.onsuccess = () => res(r.result);
     r.onerror = () => rej(r.error);
@@ -118,7 +118,7 @@ const byId = (s, id) => S[s].find((x) => x.id === id);
 async function exportData() {
   const data = {};
   for (const s of STORES) data[s] = S[s];
-  const blob = new Blob([JSON.stringify({ app: '308-load-dev-tracker', version: 7, exported: new Date().toISOString(), data }, null, 2)], { type: 'application/json' });
+  const blob = new Blob([JSON.stringify({ app: '308-load-dev-tracker', version: 8, exported: new Date().toISOString(), data }, null, 2)], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = `load-dev-backup-${today()}.json`;
@@ -482,21 +482,28 @@ function comboRow(c, best, rank) {
     ${ranked ? '' : '<div class="warn">Not enough data yet — needs 2+ groups</div>'}<div class="muted">Tap to see its groups →</div></a>`;
 }
 
-function viewRifle(rid) {
-  const r = byId('rifles', rid);
-  if (!r) return viewHome();
-  bar(back('#/', 'Firearms', true), r.name, `<button class="r" data-act="edit-rifle" data-id="${rid}">Edit</button>`);
+/* The Current Best Load pick for a firearm (moved here unchanged so the firearm page and the inventory low-stock check use the same one).
+   Rifle: best pooled mean radius at the preferred distance, 2+ groups, never a load with an issue logged.
+   Pistol: lowest pooled velocity SD, 2+ groups with readings, never a flagged load. */
+function bestInfo(rid) {
   const gs = S.groups.filter((g) => g.rifleId === rid);
   const cs = combos(gs);
   const bd = bestDist();
   const qual = cs.filter((c) => Number(c.distance) === bd && c.nGroups >= 2 && c.mr !== null); // main screen ranks one distance (default 100 yd); other distances live on the Best page
   const best = qual.find((c) => !comboFlagged(c)); // a load with an issue logged is never the current best
-  const t = rifleTotals(rid);
-  const latest = latestSession(rid);
   // Pistol: best load = lowest pooled velocity SD (same 2+ group gate; needs velocity readings). Not tied to the rifle distance setting.
   const pistol = isPistol(rid);
   const pcand = pistol ? cs.map((c) => ({ c, vp: velPool(c) })).filter(({ c, vp }) => c.nGroups >= 2 && vp.sd !== null).sort((a, b) => a.vp.sd - b.vp.sd) : [];
   const pb = pcand.find(({ c }) => !comboFlagged(c));
+  return { cs, bd, qual, best, pistol, pcand, pb };
+}
+function viewRifle(rid) {
+  const r = byId('rifles', rid);
+  if (!r) return viewHome();
+  bar(back('#/', 'Firearms', true), r.name, `<button class="r" data-act="edit-rifle" data-id="${rid}">Edit</button>`);
+  const { cs, bd, qual, best, pistol, pcand, pb } = bestInfo(rid); // the Current Best Load pick (shared with the inventory low-stock check)
+  const t = rifleTotals(rid);
+  const latest = latestSession(rid);
   const pHero = pb
     ? `<a class="hero" href="${comboHref(pb.c)}"><div class="lbl">Current best load · lowest velocity SD</div><div style="font-size:19px;font-weight:600">${esc(bl(pb.c.bulletId))} · ${esc(nm('powders', pb.c.powderId))}</div>
       <div class="mono">${pb.c.charge} gn · ${esc(nm('primers', pb.c.primerId))} · COAL ${pb.c.coal}" · ${pb.c.distance} yd</div>
@@ -508,6 +515,7 @@ function viewRifle(rid) {
       <div class="mono">${best.charge} gn · ${esc(nm('primers', best.primerId))} · ${best.jump} thou jump</div>
       <div class="big mono">${fmt(best.mr)}"</div><div class="mono">MR ${fmt(best.mrMoa, 2)} MOA · ES ${fmt(best.esMoa, 2)} MOA</div><div style="opacity:.85;font-size:13px">Tap to see its groups →</div></a>`
       : `<div class="hero"><div class="lbl">Current best load · ${bd} yd</div><div style="font-size:19px;font-weight:600">${qual.length ? 'No unflagged load qualifies yet' : 'Not enough data yet'}</div><div>${qual.length ? `Every load with 2+ groups at ${bd} yd has an issue logged on it.` : `Needs 2+ groups at the exact same Bullet + Powder + Charge + Primer + Jump at ${bd} yd. Other distances are on the Best Loads page.`}</div></div>`}
+    ${lowLine(rid)}
     <div class="grid2"><div class="card"><div class="lbl">Shots logged</div><div class="mono v" style="font-size:30px">${t.shots}</div></div>
     <div class="card"><div class="lbl">Barrel total</div><div class="mono v" style="font-size:30px">${t.barrel}</div><div class="muted">${t.start} start + ${t.shots} logged + ${t.fouling} fouling</div></div></div>
     ${latest ? `<a class="card" href="#/session/${latest.id}"><div class="lbl">Current session · tap to open</div><div class="row sb"><b>${esc(sessionLabel(latest))}</b><span class="mono">${fin(latest.fouling) ? latest.fouling : 0} fouling · ${groupsOf(latest.id).length} grp</span></div></a>` : ''}
@@ -837,6 +845,265 @@ function viewLoadCheck() {
     <div class="f"><label class="lbl" for="lc-primer">Primer · optional</label><select class="in" id="lc-primer">${opts(S.primers, LC.primer, (x) => x.name, 'Any primer')}</select></div>
     <div id="lc-out">${lcResult()}</div>`);
 }
+/* ---------- Components inventory (informational only: never feeds pooling, ranking, best load, issue flags, cost or any statistic) ----------
+   One event ledger per library item. On hand = the sum of its events (Starting count +, Purchase +, Used -, Recount +/-).
+   Powder is kept in grains and shown in lb or kg. Nothing is clamped: a negative balance is shown in red.
+   Batches create Used events. Consolidating turns each item's history into one new Starting count. */
+const INV = {
+  bullet: { store: 'bullets', title: 'Projectiles', unit: 'units', one: 'Projectile' },
+  powder: { store: 'powders', title: 'Powders', unit: 'grains', one: 'Powder' },
+  primer: { store: 'primers', title: 'Primers', unit: 'units', one: 'Primer' },
+  case: { store: 'cases', title: 'Unused cases', unit: 'virgin brass', one: 'Case' }
+};
+const INV_TYPES = { start: 'Starting count', purchase: 'Purchase', used: 'Used', recount: 'Recount' };
+const evOf = (kind, id) => S.ledger.filter((e) => e.kind === kind && e.itemId === id);
+const onHand = (kind, id) => Math.round(evOf(kind, id).reduce((a, e) => a + e.qty, 0) * 100) / 100;
+const isTracked = (kind, id) => S.ledger.some((e) => e.kind === kind && e.itemId === id);
+const toGrains = (q, unit) => Math.round((unit === 'lb' ? q * GR_PER_LB : unit === 'kg' ? q * GR_PER_KG : q) * 100) / 100;
+const num0 = (n) => (Math.round(n * 100) / 100).toLocaleString('en-US', { maximumFractionDigits: 2 });
+function qtyText(kind, item, n, signed) { // powder: lb or kg (the item's unit) with the grains beside it
+  const sign = n < 0 ? '−' : signed && n > 0 ? '+' : '', a = Math.abs(n);
+  if (kind !== 'powder') return sign + num0(a);
+  const kg = !!item && item.unit === 'kg';
+  return `${sign}${(a / (kg ? GR_PER_KG : GR_PER_LB)).toFixed(3)} ${kg ? 'kg' : 'lb'} (${num0(a)} gr)`;
+}
+const invName = (kind, id) => { const it = byId(INV[kind].store, id); return it ? it.name + (kind === 'bullet' && fin(it.weight) ? ' ' + it.weight + ' gn' : '') : '?'; };
+const invPrefs = () => S.prefs.find((p) => p.id === 'inv') || { id: 'inv', low: 200 };
+const lowLimit = () => (fin(invPrefs().low) && invPrefs().low >= 0 ? invPrefs().low : 200);
+// Low-stock check: for each firearm's Current Best Load (none yet = skipped), how many rounds can each tracked component still make?
+// Brass is not checked. A negative balance is shown in red instead. Returns Map "kind|id" -> [{ rid, name, rounds }].
+function lowStock() {
+  const lim = lowLimit(), out = new Map();
+  if (!(lim > 0)) return out;
+  for (const r of S.rifles) {
+    const info = bestInfo(r.id), c = info.pistol ? (info.pb && info.pb.c) : info.best;
+    if (!c) continue;
+    for (const [kind, id, per] of [['bullet', c.bulletId, 1], ['primer', c.primerId, 1], ['powder', c.powderId, Number(c.charge)]]) {
+      if (!isTracked(kind, id) || !(per > 0)) continue;
+      const have = onHand(kind, id);
+      if (have < 0) continue;
+      const rounds = Math.floor(have / per);
+      if (rounds < lim) { const k = kind + '|' + id; if (!out.has(k)) out.set(k, []); out.get(k).push({ rid: r.id, name: r.name, rounds }); }
+    }
+  }
+  return out;
+}
+const lowLineText = (l) => `Enough for ${l.rounds} round${l.rounds === 1 ? '' : 's'} of ${l.name}'s best load (limit ${lowLimit()})`;
+function lowLine(rid) { // small yellow notice on the firearm page
+  const rows = [];
+  for (const [k, arr] of lowStock()) { const [kind, id] = k.split('|'); for (const l of arr) if (l.rid === rid) rows.push(`${INV[kind].one}: ${invName(kind, id)} — enough for ${l.rounds} round${l.rounds === 1 ? '' : 's'} (limit ${lowLimit()})`); }
+  return rows.length ? `<a class="card excl" href="#/components"><div class="lbl">Running low · best load</div>${rows.map((t) => `<div>${esc(t)}</div>`).join('')}<div class="muted">Tap for Components</div></a>` : '';
+}
+
+function viewComponents() {
+  bar(back('#/', 'Firearms', true), 'Components');
+  const low = lowStock(), lim = lowLimit();
+  const sect = (kind) => {
+    const list = S[INV[kind].store].slice().sort((a, b) => a.name.localeCompare(b.name));
+    return `<h2>${INV[kind].title}</h2>` + (list.length ? list.map((it) => {
+      const n = onHand(kind, it.id), neg = n < 0, lw = low.get(kind + '|' + it.id), tr = isTracked(kind, it.id);
+      return `<a class="card ${neg ? 'flag' : lw ? 'excl' : ''}" href="#/components/item/${kind}/${it.id}">
+        <div class="row sb"><b>${esc(invName(kind, it.id))}</b><span class="mono v" ${neg ? 'style="color:var(--red)"' : ''}>${qtyText(kind, it, n)}</span></div>
+        <div class="muted">${neg ? '<b style="color:var(--red)">Below zero</b> · ' : ''}${INV[kind].unit}${tr ? '' : ' · nothing entered yet'}</div>
+        ${lw ? lw.map((l) => `<div class="warn">${esc(lowLineText(l))}</div>`).join('') : ''}</a>`;
+    }).join('') : `<div class="card muted">No ${INV[kind].title.toLowerCase()} in the library yet. Add them in Settings.</div>`);
+  };
+  main(`<h1>Components</h1>
+    <div class="grid2"><a class="btn pri" href="#/components/batch">Log loaded batch</a><a class="btn" href="#/components/history">History</a></div>
+    <div class="muted">On hand is the sum of each item's events. Informational only: it never changes your stats, rankings or costs. Warning limit: ${lim ? lim + ' rounds' : 'off'} (Settings).</div>
+    ${['bullet', 'powder', 'primer', 'case'].map(sect).join('')}`);
+}
+
+function invEventCard(e, withItem) {
+  const it = byId(INV[e.kind].store, e.itemId);
+  return `<div class="card"><div class="row sb"><span><span class="tag">${INV_TYPES[e.type]}</span> <span class="muted">${esc(e.date)}</span>${e.batchId ? ' <span class="tag">from batch</span>' : ''}</span><b class="mono" style="font-weight:600">${qtyText(e.kind, it, e.qty, true)}</b></div>
+    ${withItem ? `<div>${INV[e.kind].one}: ${esc(invName(e.kind, e.itemId))}</div>` : ''}${e.note ? `<div class="muted">${esc(e.note)}</div>` : ''}
+    <div class="row sb"><span></span><button class="btn sm danger" data-act="inv-del-event" data-id="${e.id}">Delete</button></div></div>`;
+}
+function viewComponentItem(kind, id) {
+  const it = INV[kind] && byId(INV[kind].store, id);
+  if (!it) return viewComponents();
+  bar(back('#/components', 'Components', true), invName(kind, id), '', null);
+  const n = onHand(kind, id), lw = lowStock().get(kind + '|' + id), evs = evOf(kind, id).sort((a, b) => b.date.localeCompare(a.date) || b.ts - a.ts);
+  main(`<div class="muted">${INV[kind].title}</div>
+    <div class="card ${n < 0 ? 'flag' : lw ? 'excl' : ''}"><div class="lbl">On hand</div><div class="mono" style="font-size:30px;font-weight:600;${n < 0 ? 'color:var(--red)' : ''}">${qtyText(kind, it, n)}</div>
+      ${n < 0 ? '<div style="color:var(--red);font-weight:600">Below zero. Check your entries or recount.</div>' : ''}${lw ? lw.map((l) => `<div class="warn">${esc(lowLineText(l))}</div>`).join('') : ''}<div class="muted">The sum of the events below.</div></div>
+    <div class="grid2"><button class="btn pri" data-act="inv-add" data-k="${kind}" data-id="${id}" data-t="start">Starting count</button><button class="btn" data-act="inv-add" data-k="${kind}" data-id="${id}" data-t="purchase">Purchase</button>
+      <button class="btn" data-act="inv-add" data-k="${kind}" data-id="${id}" data-t="recount">Recount</button><button class="btn" data-act="inv-add" data-k="${kind}" data-id="${id}" data-t="used">Used (manual)</button></div>
+    <h2>History</h2>${evs.length ? evs.map((e) => invEventCard(e, false)).join('') : '<div class="card muted">No events yet. Add a starting count to begin.</div>'}`);
+}
+function invEventDialog(kind, id, type) {
+  const it = byId(INV[kind].store, id), isP = kind === 'powder';
+  const titles = { start: 'Starting count', purchase: 'Purchase', recount: 'Recount', used: 'Used (manual)' };
+  const fields = [{ k: 'qty', label: type === 'recount' ? 'Actual count now' : 'Quantity', type: 'num', req: true }];
+  if (isP) fields.push({ k: 'unit', label: 'Unit', type: 'select', opts: [['lb', 'lb'], ['kg', 'kg'], ['gr', 'grains']] });
+  fields.push({ k: 'date', label: 'Date (YYYY-MM-DD)', req: true }, { k: 'note', label: 'Note · optional' });
+  formDialog(`${titles[type]} · ${it.name}`, fields, { date: today(), unit: isP ? (it.unit === 'kg' ? 'kg' : 'lb') : '' }, async (v) => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(v.date)) { toast('Date must be YYYY-MM-DD'); throw new Error('bad date'); }
+    if (v.qty < 0 || (type !== 'recount' && v.qty === 0)) { toast('Enter a quantity above 0'); throw new Error('bad qty'); }
+    const base = isP ? toGrains(v.qty, v.unit) : v.qty, before = onHand(kind, id);
+    let signed = type === 'used' ? -base : base, note = v.note;
+    if (type === 'recount') {
+      signed = Math.round((base - before) * 100) / 100;
+      if (signed === 0) { toast('That matches what is on hand, nothing to log'); throw new Error('no change'); }
+      note = `Counted ${qtyText(kind, it, base)}, was ${qtyText(kind, it, before)}${v.note ? ' · ' + v.note : ''}`;
+    }
+    await put('ledger', { id: uid(), kind, itemId: id, type, qty: signed, date: v.date, note, ts: Date.now() });
+  });
+}
+async function invDelEvent(id) {
+  const e = byId('ledger', id); if (!e) return;
+  if (!confirm(e.batchId ? 'This event came from a batch. The batch record stays; deleting the batch later removes any events that remain. Delete this event?' : 'Delete this event? On hand recomputes.')) return;
+  await del('ledger', id); render();
+}
+
+/* Log a loaded batch: pick (or type) the parts, the rounds and the date; saving creates Used events. */
+let IB = { rid: '', load: '', bullet: '', powder: '', primer: '', case: '', charge: '', rounds: '', date: '', deduct: true, all: false };
+const loggedLoads = (rid) => { const m = new Map(); for (const g of S.groups.filter((x) => x.rifleId === rid).sort((a, b) => b.ts - a.ts)) { const k = [g.bulletId, g.powderId, Number(g.charge), g.primerId].join('|'); if (!m.has(k)) m.set(k, g); } return [...m.entries()]; };
+function ibLines() {
+  const n = num(IB.rounds), ch = num(IB.charge), lines = [], skipped = [];
+  if (!(n > 0)) return { lines, skipped, error: 'Enter the number of rounds' };
+  const add = (kind, id, qty) => { const have = onHand(kind, id); lines.push({ kind, id, qty, before: have, after: Math.round((have - qty) * 100) / 100 }); };
+  if (IB.bullet) add('bullet', IB.bullet, n); else skipped.push('No bullet chosen: projectiles not deducted');
+  if (IB.powder && ch > 0) add('powder', IB.powder, Math.round(n * ch * 100) / 100); else skipped.push(IB.powder ? 'No charge entered: powder not deducted' : 'No powder chosen: powder not deducted');
+  if (IB.primer) add('primer', IB.primer, n); else skipped.push('No primer chosen: primers not deducted');
+  if (IB.deduct) { if (IB.case) add('case', IB.case, n); else skipped.push('No case chosen: cases not deducted'); }
+  return { lines, skipped };
+}
+function ibSummaryHtml(r, title) {
+  if (r.error) return `<div class="muted">${r.error}.</div>`;
+  const neg = r.lines.filter((l) => l.after < 0);
+  return `<div class="lbl">${title}</div>${r.lines.map((l) => { const it = byId(INV[l.kind].store, l.id); return `<div class="row sb"><span>${esc(INV[l.kind].one)} · ${esc(invName(l.kind, l.id))}</span><span class="mono" ${l.after < 0 ? 'style="color:var(--red)"' : ''}>${qtyText(l.kind, it, l.before)} → ${qtyText(l.kind, it, l.after)}</span></div>`; }).join('')}
+    ${neg.map((l) => `<div style="color:var(--red);font-weight:600">${esc(INV[l.kind].one)} would go below zero${isTracked(l.kind, l.id) ? '' : ' (nothing entered for it yet)'}.</div>`).join('')}
+    ${r.skipped.map((t) => `<div class="muted">${esc(t)}</div>`).join('')}`;
+}
+function viewBatch() {
+  bar(back('#/components', 'Components', true), 'Log loaded batch');
+  if (!IB.date) IB.date = today();
+  if (IB.rid && !byId('rifles', IB.rid)) IB.rid = '';
+  const caseList = IB.rid && !IB.all ? casesFor(IB.rid, IB.case) : S.cases;
+  const loads = IB.rid ? loggedLoads(IB.rid) : [];
+  const sel = (kind, label, list) => `<div class="f"><label class="lbl" for="ib-${kind}">${label}</label><select class="in" id="ib-${kind}">${opts(list, IB[kind], (x) => x.name + (kind === 'bullet' && fin(x.weight) ? ' ' + x.weight + ' gn' : ''), '— none —')}</select></div>`;
+  main(`<h1>Log loaded batch</h1>
+    <div class="muted">Records the components you used up loading a batch of rounds. It never changes group shot counts or fouling shots.</div>
+    <div class="f"><label class="lbl" for="ib-rid">Firearm · optional</label><select class="in" id="ib-rid">${opts(S.rifles, IB.rid, (x) => x.name, 'No firearm')}</select></div>
+    ${IB.rid && loads.length ? `<div class="f"><label class="lbl" for="ib-load">Logged load</label><select class="in" id="ib-load"><option value="">— pick a load —</option>${loads.map(([k, g]) => `<option value="${esc(k)}"${IB.load === k ? ' selected' : ''}>${esc(bl(g.bulletId))} · ${esc(nm('powders', g.powderId))} ${g.charge} gn · ${esc(nm('primers', g.primerId))}</option>`).join('')}</select><div class="muted">Fills the parts below. Change any of them by hand.</div></div>` : ''}
+    ${sel('bullet', 'Bullet', S.bullets)}${sel('powder', 'Powder', S.powders)}
+    <div class="f"><label class="lbl" for="ib-charge">Charge (gn)</label><input class="in m" id="ib-charge" inputmode="decimal" value="${esc(IB.charge)}"></div>
+    ${sel('primer', 'Primer', S.primers)}
+    <div class="f"><label class="lbl" for="ib-case">Case</label><select class="in" id="ib-case">${opts(caseList, IB.case, (x) => x.name, '— none —')}</select>${IB.rid && (caseList.length < S.cases.length || IB.all) ? `<div class="muted"><label style="text-decoration:underline"><input type="checkbox" id="ib-allcase"${IB.all ? ' checked' : ''}> show all cases</label></div>` : ''}</div>
+    <div class="grid2"><div class="f"><label class="lbl" for="ib-rounds">Rounds loaded</label><input class="in m" id="ib-rounds" inputmode="numeric" value="${esc(IB.rounds)}"></div>
+      <div class="f"><label class="lbl" for="ib-date">Date</label><input class="in m" id="ib-date" value="${esc(IB.date)}"></div></div>
+    <label class="row" style="min-height:44px;font-weight:600"><input type="checkbox" id="ib-deduct" style="width:24px;height:24px"${IB.deduct ? ' checked' : ''}> Deduct unused cases</label>
+    <div class="card" id="ib-sum">${ibSummaryHtml(ibLines(), 'Summary')}</div>
+    <button class="btn pri" data-act="ib-save">Review and save</button>`);
+}
+function ibConfirm() {
+  const r = ibLines();
+  if (r.error) return toast(r.error);
+  if (!r.lines.length) return toast('Nothing to deduct: pick at least one component');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(IB.date)) return toast('Date must be YYYY-MM-DD');
+  const d = document.createElement('dialog');
+  d.innerHTML = `<form method="dialog" style="display:flex;flex-direction:column;gap:12px"><h1 style="font-size:22px">Save this batch?</h1>
+    <div class="card" style="border:2px solid var(--accent-text)"><b>${esc(IB.date)} · ${esc(IB.rounds)} rounds</b>${ibSummaryHtml(r, 'Components used')}</div>
+    <button class="btn pri" type="button" id="ib-ok">Confirm and save</button><button class="btn" type="button" id="ib-x">Cancel</button></form>`;
+  document.body.appendChild(d);
+  const close = () => { d.close(); d.remove(); };
+  $('#ib-x', d).onclick = close;
+  $('#ib-ok', d).onclick = async () => { close(); await ibSave(r.lines); };
+  d.addEventListener('cancel', () => setTimeout(() => d.remove(), 0));
+  d.showModal();
+}
+async function ibSave(lines) {
+  const keyOf = (m) => [...m].flatMap(([k, arr]) => arr.map((x) => k + '#' + x.rid));
+  const before = new Set(keyOf(lowStock()));
+  const rounds = num(IB.rounds);
+  const batch = { id: uid(), ts: Date.now(), date: IB.date, rifleId: IB.rid, bulletId: IB.bullet, powderId: IB.powder, primerId: IB.primer, caseId: IB.case, charge: num(IB.charge), rounds, deductCases: !!(IB.deduct && IB.case), settled: false };
+  await put('batches', batch);
+  for (const l of lines) await put('ledger', { id: uid(), kind: l.kind, itemId: l.id, type: 'used', qty: -l.qty, date: IB.date, note: `Batch: ${rounds} rounds`, batchId: batch.id, ts: Date.now() });
+  // pop-up only for components that dropped below the limit because of THIS batch
+  const after = lowStock(), newly = [];
+  for (const [k, arr] of after) for (const x of arr) if (!before.has(k + '#' + x.rid)) newly.push({ k, ...x });
+  IB = { ...IB, load: '', bullet: '', powder: '', primer: '', case: '', charge: '', rounds: '', date: '', deduct: true, all: false };
+  navTo('#/components', true); toast('Batch saved');
+  if (newly.length) lowPopup(newly);
+}
+function lowPopup(newly) {
+  const d = document.createElement('dialog');
+  d.innerHTML = `<form method="dialog" style="display:flex;flex-direction:column;gap:12px"><h1 style="font-size:22px">Running low</h1>
+    <div class="card excl">${newly.map((x) => { const [kind, id] = x.k.split('|'); return `<div><b>${esc(INV[kind].one)}: ${esc(invName(kind, id))}</b><div>${esc(lowLineText(x))}</div></div>`; }).join('')}</div>
+    <div class="muted">These dropped below your limit because of the batch you just saved.</div><button class="btn pri" type="button" id="lp-ok">OK</button></form>`;
+  document.body.appendChild(d);
+  $('#lp-ok', d).onclick = () => { d.close(); d.remove(); };
+  d.addEventListener('cancel', () => setTimeout(() => d.remove(), 0));
+  d.showModal();
+}
+
+function viewInvHistory() {
+  bar(back('#/components', 'Components', true), 'History');
+  const bIds = new Set(S.batches.map((b) => b.id));
+  const rows = [
+    ...S.batches.map((b) => ({ t: 'b', date: b.date, ts: b.ts, o: b })),
+    ...S.ledger.filter((e) => !e.batchId || !bIds.has(e.batchId)).map((e) => ({ t: 'e', date: e.date, ts: e.ts, o: e }))
+  ].sort((a, b) => b.date.localeCompare(a.date) || b.ts - a.ts);
+  const batchCard = (b) => {
+    const evs = S.ledger.filter((e) => e.batchId === b.id);
+    const sums = evs.map((e) => { const it = byId(INV[e.kind].store, e.itemId); return `${qtyText(e.kind, it, e.qty, true)} ${e.kind === 'powder' ? 'powder' : INV[e.kind].title.toLowerCase()}`; });
+    const r = byId('rifles', b.rifleId);
+    return `<div class="card"><div class="row sb"><span><span class="tag" style="background:var(--accent-soft);color:var(--accent-text)">Batch</span>${b.settled ? ' <span class="tag">settled</span>' : ''} <span class="muted">${esc(b.date)}</span></span><b class="mono" style="font-weight:600">${b.rounds} rds</b></div>
+      <div>${esc(r ? r.name + ' · ' : '')}${esc(invName('bullet', b.bulletId))} · ${esc(invName('powder', b.powderId))} ${fin(b.charge) ? b.charge + ' gn' : ''} · ${esc(invName('primer', b.primerId))}</div>
+      <div class="muted">${evs.length ? esc(sums.join(' · ')) : 'Its events were consolidated into the starting counts.'}</div>
+      <div class="row sb"><span></span><button class="btn sm danger" data-act="inv-del-batch" data-id="${b.id}">Delete batch</button></div></div>`;
+  };
+  main(`<h1>History</h1>
+    <div class="muted">Loaded batches and every individual addition, use and recount, newest first. Each item's own page shows just its events.</div>
+    ${rows.length ? rows.map((x) => (x.t === 'b' ? batchCard(x.o) : invEventCard(x.o, true))).join('') : '<div class="card muted">Nothing logged yet.</div>'}
+    <h2>Consolidate</h2>
+    <div class="card"><div>Turns every component's history into one new Starting count equal to what is on hand now, and deletes the individual events. Batches stay in the list as a log, marked settled.</div></div>
+    <button class="btn" data-act="inv-consolidate" style="border-color:var(--accent-text);color:var(--accent-text)">Consolidate all components</button>`);
+}
+async function invDelBatch(id) {
+  const b = byId('batches', id); if (!b) return;
+  const evs = S.ledger.filter((e) => e.batchId === id);
+  if (!confirm(evs.length ? `Delete this batch and its ${evs.length} event${evs.length === 1 ? '' : 's'}? On hand goes back up by what it used.` : 'Delete this batch record? Its events were already consolidated, so on hand does not change.')) return;
+  for (const e of evs) await del('ledger', e.id);
+  await del('batches', id); toast('Batch deleted'); render();
+}
+function invConsolidate() {
+  const items = [];
+  for (const kind of Object.keys(INV)) for (const it of S[INV[kind].store]) {
+    const ev = evOf(kind, it.id);
+    if (!ev.length || (ev.length === 1 && ev[0].type === 'start')) continue; // nothing to collapse
+    items.push({ kind, it, n: ev.length, have: onHand(kind, it.id) });
+  }
+  if (!items.length) return toast('Nothing to consolidate: every item is already a single starting count');
+  const neg = items.some((x) => x.have < 0), old = !S.cfg.lastBackup || Date.now() - S.cfg.lastBackup > 864e5;
+  const d = document.createElement('dialog');
+  d.innerHTML = `<form method="dialog" style="display:flex;flex-direction:column;gap:12px"><h1 style="font-size:22px">Consolidate all components?</h1>
+    <div class="card" style="border:2px solid var(--accent-text)">${items.map((x) => `<div class="row sb"><span>${esc(INV[x.kind].one)} · ${esc(invName(x.kind, x.it.id))}</span><span class="mono" ${x.have < 0 ? 'style="color:var(--red)"' : ''}>${qtyText(x.kind, x.it, x.have)} · ${x.n} events</span></div>`).join('')}
+      ${neg ? '<div style="color:var(--red);font-weight:600">At least one item is below zero. It will start below zero. Recount it first if that is wrong.</div>' : ''}
+      <div>Each becomes one Starting count dated today, and its old events are deleted. This cannot be undone.</div>
+      <div class="muted">${S.cfg.lastBackup ? 'Last backup: ' + new Date(S.cfg.lastBackup).toLocaleString() : 'You have not made a backup yet.'}</div></div>
+    <button class="btn ${old ? 'pri' : ''}" type="button" id="co-backup">Back up first, then consolidate</button>
+    <button class="btn ${old ? '' : 'pri'}" type="button" id="co-go">Consolidate without a new backup</button><button class="btn" type="button" id="co-x">Cancel</button></form>`;
+  document.body.appendChild(d);
+  const close = () => { d.close(); d.remove(); };
+  const apply = async () => {
+    const day = today();
+    for (const x of items) {
+      for (const e of evOf(x.kind, x.it.id)) await del('ledger', e.id);
+      await put('ledger', { id: uid(), kind: x.kind, itemId: x.it.id, type: 'start', qty: x.have, date: day, note: `Consolidated from ${x.n} events on ${day}`, ts: Date.now() });
+    }
+    for (const b of S.batches) if (!b.settled) await put('batches', { ...b, settled: true });
+    close(); toast(`Consolidated ${items.length} component${items.length === 1 ? '' : 's'}`); render();
+  };
+  $('#co-x', d).onclick = close;
+  $('#co-go', d).onclick = apply;
+  $('#co-backup', d).onclick = async () => { try { await exportData(); } catch (e) { toast('Backup failed, nothing was consolidated'); return; } await apply(); };
+  d.addEventListener('cancel', () => setTimeout(() => d.remove(), 0));
+  d.showModal();
+}
+
 /* Load Cost Calculator: one bullet, one primer, one case per round, plus a powder charge. Each part comes from the library or is entered manually. */
 const CC_STORE = { bullet: 'bullets', powder: 'powders', primer: 'primers', case: 'cases' };
 const CC_FIELDS = {
@@ -1460,6 +1727,9 @@ function viewSettings() {
     <div class="grid2"><div class="f"><label class="lbl" for="cost-tax">Tax rate (%)</label><input class="in m" id="cost-tax" inputmode="decimal" value="${taxPct()}"></div>
     <div class="f"><label class="lbl" for="cost-cur">Currency label</label><input class="in" id="cost-cur" value="${esc(curLabel())}" maxlength="6"></div></div>
     <div class="muted">Applies to every price you enter in the libraries (prices are before tax). The label is display only. Changing a price or the tax rate changes every load's cost everywhere, and no price history is kept.</div>
+    <h2>INVENTORY</h2>
+    <div class="f"><label class="lbl" for="inv-low">Warn below this many rounds of a firearm's best load</label><input class="in m" id="inv-low" inputmode="numeric" value="${lowLimit()}"></div>
+    <div class="muted">A bullet, primer or powder that can no longer make this many rounds of a firearm's Current Best Load shows yellow on Components and on that firearm's page. 0 turns it off. Brass is never checked, and a firearm with no best load yet is skipped.</div>
     <h2>PREFERENCES</h2>
     <div class="f"><label class="lbl" for="pref-dist">Main-screen best load distance (yards)</label><input class="in m" id="pref-dist" inputmode="numeric" value="${bestDist()}"></div>
     <div class="muted">The firearm page shows the best rifle load at this distance. Every distance is on the Best Loads page.</div>
@@ -1518,6 +1788,7 @@ function libForm(s, x) {
           return false;
         }
       }
+      if (['bullets', 'powders', 'primers', 'cases'].includes(s) && S.ledger.some((e) => e.itemId === x.id)) { toast('Has inventory history — delete its events first'); return false; }
       if (!confirm('Delete this item?')) return false;
       await del(s, x.id); return true;
     } : null, ['bullets', 'powders', 'primers', 'cases'].includes(s) ? (v) => costLive(s, v) : null);
@@ -1534,6 +1805,7 @@ function render() {
     else if (p[0] === 'rifle') viewRifle(p[1]);
     else if (p[0] === 'all') viewAll(p[1]);
     else if (p[0] === 'tools') { if (p[1] === 'crimp') viewCrimp(); else if (p[1] === 'loadcheck') viewLoadCheck(); else if (p[1] === 'cost') viewCostCalc(); else viewTools(); }
+    else if (p[0] === 'components') { if (p[1] === 'item') viewComponentItem(p[2], p[3]); else if (p[1] === 'batch') viewBatch(); else if (p[1] === 'history') viewInvHistory(); else viewComponents(); }
     else if (p[0] === 'issues') viewIssues(p[1]);
     else if (p[0] === 'best') viewBest(p[1]);
     else if (p[0] === 'load') viewLoad(p[1]);
@@ -1610,6 +1882,11 @@ document.addEventListener('click', (e) => {
   else if (a === 'la-sort') { LA.sort = t.dataset.v; viewAllKeepScroll(); }
   else if (a === 'is-tab') { IS.tab = t.dataset.v; viewAllKeepScroll(); }
   else if (a === 'cc-save') ccSave(t.dataset.v);
+  else if (a === 'inv-add') invEventDialog(t.dataset.k, id, t.dataset.t);
+  else if (a === 'inv-del-event') invDelEvent(id);
+  else if (a === 'inv-del-batch') invDelBatch(id);
+  else if (a === 'inv-consolidate') invConsolidate();
+  else if (a === 'ib-save') ibConfirm();
   else if (a === 'set-case') setCaseBulk(id);
   else if (a === 'menu') { const m = $('#menu'); m.hidden = !m.hidden; t.setAttribute('aria-expanded', String(!m.hidden)); }
   else if (a === 'cr-pass') { CR.pass = Number(t.dataset.p); crSave(); viewAllKeepScroll(); window.scrollTo(0, 0); }
@@ -1639,6 +1916,15 @@ document.addEventListener('input', (e) => {
     const row = e.target.closest('.crrow');
     CR.vals[crKey(row.dataset.p, row.dataset.r)] = e.target.value.trim();
     crSave(); crRefresh();
+  } else if (e.target.id && e.target.id.startsWith('ib-') && e.target.id !== 'ib-allcase' && e.target.id !== 'ib-deduct') { // Log loaded batch
+    const id = e.target.id, v = e.target.value, sum = () => { const s = $('#ib-sum'); if (s) s.innerHTML = ibSummaryHtml(ibLines(), 'Summary'); };
+    if (id === 'ib-rid') { IB.rid = v; IB.load = ''; IB.all = false; viewAllKeepScroll(); }
+    else if (id === 'ib-load') {
+      const g = v && S.groups.filter((x) => x.rifleId === IB.rid && [x.bulletId, x.powderId, Number(x.charge), x.primerId].join('|') === v).sort((a, b) => b.ts - a.ts)[0];
+      if (g) { IB.load = v; IB.bullet = g.bulletId; IB.powder = g.powderId; IB.primer = g.primerId; IB.charge = String(g.charge); IB.case = g.caseId && byId('cases', g.caseId) ? g.caseId : ''; viewAllKeepScroll(); }
+    }
+    else if (['ib-bullet', 'ib-powder', 'ib-primer', 'ib-case'].includes(id)) { IB[id.slice(3)] = v; sum(); }
+    else if (['ib-charge', 'ib-rounds', 'ib-date'].includes(id)) { IB[id.slice(3)] = v.trim(); sum(); }
   } else if (e.target.id && e.target.id.startsWith('cc-') && e.target.id !== 'cc-allcase') { // Load cost calculator
     const id = e.target.id, v = e.target.value;
     if (id === 'cc-rid') { CC.rid = v; CC.all = false; viewAllKeepScroll(); }
@@ -1688,6 +1974,9 @@ document.addEventListener('change', (e) => {
     put('prefs', { id: 'cost', tax: n !== null && n >= 0 ? n : 12, currency: cur }).then(() => { $('#cost-tax').value = taxPct(); $('#cost-cur').value = curLabel(); });
   }
   if (e.target.id === 'cc-allcase') { CC.all = e.target.checked; viewAllKeepScroll(); }
+  if (e.target.id === 'ib-allcase') { IB.all = e.target.checked; viewAllKeepScroll(); }
+  if (e.target.id === 'ib-deduct') { IB.deduct = e.target.checked; const s = $('#ib-sum'); if (s) s.innerHTML = ibSummaryHtml(ibLines(), 'Summary'); }
+  if (e.target.id === 'inv-low') { const n = num(e.target.value); put('prefs', { id: 'inv', low: n !== null && n >= 0 ? Math.round(n) : 200 }).then(() => { e.target.value = lowLimit(); }); }
   if (e.target.id === 'pref-dist') {
     const n = num(e.target.value);
     S.cfg.bestDist = n !== null && n > 0 ? Math.round(n) : 100;
