@@ -1,5 +1,5 @@
 'use strict';
-const APP_VERSION = 'v22'; // keep in step with CACHE in sw.js (shown in Settings > About so you can tell which copy a browser is running)
+const APP_VERSION = 'v23'; // keep in step with CACHE in sw.js (shown in Settings > About so you can tell which copy a browser is running)
 /* ---------- helpers ---------- */
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
@@ -118,13 +118,31 @@ const byId = (s, id) => S[s].find((x) => x.id === id);
 // pick-list. keepId keeps the item already chosen on a record being edited, so editing never silently swaps it.
 const act = (list, keepId) => list.filter((x) => !x.archived || x.id === keepId);
 
-async function exportData() {
+function buildExport() { // the one backup file, used by both Export (download) and Share backup
   const data = {};
   for (const s of STORES) data[s] = S[s];
-  const blob = new Blob([JSON.stringify({ app: '308-load-dev-tracker', version: 10, exported: new Date().toISOString(), data }, null, 2)], { type: 'application/json' });
+  return { json: JSON.stringify({ app: '308-load-dev-tracker', version: 10, exported: new Date().toISOString(), data }, null, 2), name: `load-dev-backup-${today()}.json` };
+}
+async function markBackedUp() { S.cfg.lastBackup = Date.now(); S.cfg.snooze = 0; await saveCfg(); renderBanners(); }
+/* Share backup: the same file, handed to the phone's share sheet. The file is built synchronously inside the tap (no await before navigator.share),
+   so the share call stays inside the user gesture. Only a completed share counts as a backup for the reminder; cancelling does not. */
+async function shareBackup() {
+  const { json, name } = buildExport();
+  const file = new File([json], name, { type: 'application/json' });
+  let can = false;
+  try { can = !!(navigator.share && navigator.canShare && navigator.canShare({ files: [file] })); } catch (e) { can = false; }
+  if (!can) { await exportData(); toast('Sharing files is not supported here, so the backup was downloaded instead'); return; }
+  try { await navigator.share({ files: [file], title: 'Load Dev backup' }); }
+  catch (e) { toast(e && e.name === 'AbortError' ? 'Share cancelled. Backup not recorded.' : 'Share failed. Use Export data instead.'); return; }
+  await markBackedUp();
+  toast('Share completed. Backup recorded.');
+}
+async function exportData() {
+  const { json, name } = buildExport();
+  const blob = new Blob([json], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = `load-dev-backup-${today()}.json`;
+  a.download = name;
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   S.cfg.lastBackup = Date.now(); S.cfg.snooze = 0;
@@ -1843,7 +1861,9 @@ function viewSettings() {
     <div class="muted">The firearm page shows the best rifle load at this distance. Every distance is on the Best Loads page.</div>
     <h2>BACKUP</h2>
     <div class="muted">Data lives only on this device. Export a JSON file to back up or move it to another device.</div>
-    <div class="grid2"><button class="btn dark" data-act="export">Export data</button><button class="btn" data-act="import">Import data</button></div>
+    <div class="grid2"><button class="btn dark" data-act="export">Export data</button><button class="btn dark" data-act="share">Share backup</button></div>
+    <button class="btn" data-act="import">Import data</button>
+    <div class="muted">Share backup opens your phone's share sheet (email, Files, a cloud drive). Sharing can't confirm the file arrived: the reminder resets when you finish the share sheet, not when the file is delivered. Cancelling it changes nothing. Where sharing files isn't available it downloads instead.</div>
     <div class="muted">${S.cfg.lastBackup ? 'Last backup: ' + new Date(S.cfg.lastBackup).toLocaleString() : 'No backup made yet.'}</div>
     <div class="lbl" style="margin-top:6px">Remind me after</div>
     <div class="grid2"><div class="f"><label class="lbl" for="bk-days">Days</label><input class="in m" id="bk-days" inputmode="numeric" value="${S.cfg.days}"></div>
@@ -1953,7 +1973,7 @@ function renderBanners() {
   const onForm = /^#\/(add|edit)\//.test(location.hash); // never nag mid-entry
   const due = onForm ? null : backupDue();
   box.innerHTML = (updateWorker ? `<div class="banner"><span>Update available</span><button class="btn sm dark" data-act="apply-update">Reload &amp; update</button></div>` : '')
-    + (due ? `<div class="banner warnb"><span>${esc(due)} Back up now.</span><button class="btn sm dark" data-act="export">Backup Now</button><button class="btn sm" data-act="snooze">Later</button></div>` : '');
+    + (due ? `<div class="banner warnb"><span>${esc(due)} Back up now.</span><button class="btn sm dark" data-act="export">Backup Now</button><button class="btn sm dark" data-act="share">Share</button><button class="btn sm" data-act="snooze">Later</button></div>` : '');
 }
 function initUpdates() {
   if (!('serviceWorker' in navigator)) return;
@@ -2015,6 +2035,7 @@ document.addEventListener('click', (e) => {
   else if (a === 'apply-update') { if (updateWorker) updateWorker.postMessage({ type: 'SKIP_WAITING' }); }
   else if (a === 'snooze') { S.cfg.snooze = Date.now() + 864e5; saveCfg(); renderBanners(); }
   else if (a === 'export') exportData();
+  else if (a === 'share') shareBackup();
   else if (a === 'import') $('#imp').click();
   else if (a === 'add-shot') { const tb = $('#shots'); tb.insertAdjacentHTML('beforeend', shotRow(tb.rows.length)); $$('#shots tr:last-child .sv')[0].focus(); }
   else if (a === 'rm-shot') { const tb = $('#shots'); if (tb.rows.length > 1) { tb.deleteRow(-1); preview(); } }

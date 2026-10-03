@@ -1,6 +1,6 @@
 'use strict';
 // Bump CACHE whenever any shell file changes so installed copies update (and bump APP_VERSION at the top of app.js to match).
-const CACHE = 'loaddev-v22';
+const CACHE = 'loaddev-v23';
 const SHELL = [
   './',
   './index.html',
