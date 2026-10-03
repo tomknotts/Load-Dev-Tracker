@@ -1,5 +1,5 @@
 'use strict';
-const APP_VERSION = 'v24'; // keep in step with CACHE in sw.js (shown in Settings > About so you can tell which copy a browser is running)
+const APP_VERSION = 'v25'; // keep in step with CACHE in sw.js (shown in Settings > About so you can tell which copy a browser is running)
 /* ---------- helpers ---------- */
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
@@ -123,6 +123,11 @@ function buildExport() { // the one backup file, used by both Export (download) 
   for (const s of STORES) data[s] = S[s];
   return { json: JSON.stringify({ app: '308-load-dev-tracker', version: 10, exported: new Date().toISOString(), data }, null, 2), name: `load-dev-backup-${today()}.json` };
 }
+/* Chrome (and every Chromium browser) refuses to share .json / application/json files: canShare says yes, then share() rejects with
+   NotAllowedError "Permission denied". Plain text is on its allowed list, so on Chromium the same JSON text is shared as `<name>.txt`
+   (Import data reads any file by its content, so it imports the .txt as is). Other browsers (Safari) get the real .json file. */
+const isChromium = () => /Chrom(e|ium)|Edg\//.test(navigator.userAgent);
+const shareFile = (json, name) => (isChromium() ? new File([json], name + '.txt', { type: 'text/plain' }) : new File([json], name, { type: 'application/json' }));
 function shareSupport(file) { // '' when this browser can share the file, otherwise the reason it cannot
   if (!navigator.share) return 'no share function' + (window.isSecureContext ? '' : ', page not secure');
   if (!navigator.canShare) return 'no canShare';
@@ -133,7 +138,7 @@ async function markBackedUp() { S.cfg.lastBackup = Date.now(); S.cfg.snooze = 0;
    so the share call stays inside the user gesture. Only a completed share counts as a backup for the reminder; cancelling does not. */
 async function shareBackup() {
   const { json, name } = buildExport();
-  const file = new File([json], name, { type: 'application/json' });
+  const file = shareFile(json, name);
   const why = shareSupport(file);
   if (why) { await exportData(); toast(`Sharing files is not supported here (${why}), so the backup was downloaded instead`); return; }
   try { await navigator.share({ files: [file] }); }
@@ -1867,14 +1872,14 @@ function viewSettings() {
     <div class="muted">Data lives only on this device. Export a JSON file to back up or move it to another device.</div>
     <div class="grid2"><button class="btn dark" data-act="export">Export data</button><button class="btn dark" data-act="share">Share backup</button></div>
     <button class="btn" data-act="import">Import data</button>
-    <div class="muted">Share backup opens your phone's share sheet (email, Files, a cloud drive). Sharing can't confirm the file arrived: the reminder resets when you finish the share sheet, not when the file is delivered. Cancelling it changes nothing. Where sharing files isn't available it downloads instead.</div>
-    <div class="muted" id="share-diag">${esc((() => { const w = shareSupport(new File(['{}'], 'x.json', { type: 'application/json' })); return w ? 'File sharing on this device: not available (' + w + ').' : 'File sharing on this device: available.'; })())}</div>
+    <div class="muted">Share backup opens your phone's share sheet (email, Files, a cloud drive). Sharing can't confirm the file arrived: the reminder resets when you finish the share sheet, not when the file is delivered. Cancelling it changes nothing. Where sharing files isn't available it downloads instead. On Chrome the shared file ends in .json.txt, because Chrome won't share .json files. Import data opens it the same.</div>
+    <div class="muted" id="share-diag">${esc((() => { const w = shareSupport(shareFile('{}', 'x.json')); return w ? 'File sharing on this device: not available (' + w + ').' : 'File sharing on this device: available.'; })())}</div>
     <div class="muted">${S.cfg.lastBackup ? 'Last backup: ' + new Date(S.cfg.lastBackup).toLocaleString() : 'No backup made yet.'}</div>
     <div class="lbl" style="margin-top:6px">Remind me after</div>
     <div class="grid2"><div class="f"><label class="lbl" for="bk-days">Days</label><input class="in m" id="bk-days" inputmode="numeric" value="${S.cfg.days}"></div>
     <div class="f"><label class="lbl" for="bk-groups">New groups</label><input class="in m" id="bk-groups" inputmode="numeric" value="${S.cfg.groups}"></div></div>
     <div class="muted">Whichever comes first. Set either to 0 to turn that trigger off.</div>
-    <input type="file" id="imp" accept="application/json,.json" hidden>
+    <input type="file" id="imp" accept="application/json,.json,text/plain,.txt" hidden>
     <div class="muted" id="persist"></div>
     <h2>ABOUT</h2>
     <div class="muted" id="ver">App version ${APP_VERSION}</div>`);
