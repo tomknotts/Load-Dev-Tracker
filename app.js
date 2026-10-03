@@ -1,5 +1,5 @@
 'use strict';
-const APP_VERSION = 'v21'; // keep in step with CACHE in sw.js (shown in Settings > About so you can tell which copy a browser is running)
+const APP_VERSION = 'v22'; // keep in step with CACHE in sw.js (shown in Settings > About so you can tell which copy a browser is running)
 /* ---------- helpers ---------- */
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
@@ -121,7 +121,7 @@ const act = (list, keepId) => list.filter((x) => !x.archived || x.id === keepId)
 async function exportData() {
   const data = {};
   for (const s of STORES) data[s] = S[s];
-  const blob = new Blob([JSON.stringify({ app: '308-load-dev-tracker', version: 9, exported: new Date().toISOString(), data }, null, 2)], { type: 'application/json' });
+  const blob = new Blob([JSON.stringify({ app: '308-load-dev-tracker', version: 10, exported: new Date().toISOString(), data }, null, 2)], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = `load-dev-backup-${today()}.json`;
@@ -183,6 +183,12 @@ const bestDist = () => (fin(S.cfg.bestDist) && S.cfg.bestDist > 0 ? S.cfg.bestDi
 // A combo = Bullet + Powder + Charge + Primer + Jump + Distance. Distance is part of it because the best load at 100 yd may not be best at 300.
 // Firearm type: 'rifle' or 'pistol'. A record with no type is a rifle (nothing is rewritten, the default is applied when reading).
 const isPistol = (rid) => { const r = byId('rifles', rid); return !!r && r.type === 'pistol'; };
+// Archived firearms (`archived` is true only when set, so old data and old exports read as active) are hidden from the main page and every firearm
+// pick-list, skipped by the low-stock check, and open view-only. Nothing about their groups, sessions, batches or ledger is ever touched.
+const isArch = (rid) => { const r = byId('rifles', rid); return !!r && !!r.archived; };
+const liveRifles = () => S.rifles.filter((r) => !r.archived);
+const archBanner = (rid) => (isArch(rid) ? `<div class="card excl"><div class="row sb"><b><span class="tag">Archived</span> View only</b><button class="btn sm" data-act="rifle-restore" data-id="${rid}">Restore</button></div><div class="muted">Adding and editing are off until you restore this firearm. Its data is unchanged.</div></div>` : '');
+const viewOnly = (rid) => { if (!isArch(rid)) return false; toast('Archived firearm: restore it to add or edit'); return true; };
 // Rifle key uses Jump; pistol key uses COAL instead (no jump on a pistol). Everything else, including this pooling function, is shared.
 const ckey = (g) => (isPistol(g.rifleId)
   ? [g.bulletId, g.powderId, Number(g.charge), g.primerId, Number(g.coal), Number(g.distance)]
@@ -417,15 +423,38 @@ function formDialog(title, fields, vals, onSave, onDelete, live) {
 /* ---------- views ---------- */
 function viewHome() {
   bar('', 'Load Dev Tracker', '<button class="r" data-act="menu" aria-label="Menu" aria-haspopup="true" aria-expanded="false" aria-controls="menu"><svg width="26" height="26" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M3 12h18M3 18h18" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg></button>');
-  const rows = S.rifles.slice().sort((a, b) => a.name.localeCompare(b.name)).map((r) => {
+  const rows = liveRifles().sort((a, b) => a.name.localeCompare(b.name)).map((r) => {
     const t = rifleTotals(r.id);
     return `<a class="item" href="#/rifle/${r.id}"><div><b style="font-size:20px">${esc(r.name)}</b><small>${r.type === 'pistol' ? 'Pistol · ' : 'Rifle · '}${esc(calName(r.caliberId))}${r.barrel ? ' · ' + r.barrel + ' in' : ''}</small></div><div style="text-align:right"><div class="mono v">${t.barrel}</div><small>barrel rounds</small></div></a>`;
   }).join('');
-  main(`<h1>Firearms</h1>${rows || '<div class="card muted">No firearms yet. Add one to start logging.</div>'}
+  main(`<h1>Firearms</h1>${rows || `<div class="card muted">${S.rifles.length ? 'Every firearm is archived. Restore one from Archive in the menu.' : 'No firearms yet. Add one to start logging.'}</div>`}
     <button class="btn pri" data-act="new-rifle">+ Add New Firearm</button>
     <div class="muted">Stored on this device only. Use Export in Settings to back up.</div>`);
 }
 
+function rifleBlock(r) { // why a firearm cannot be deleted; '' = free to delete (no groups, no historical entries, no batches)
+  const nG = S.groups.filter((g) => g.rifleId === r.id).length, nH = S.hist.filter((h) => h.rifleId === r.id).length, nB = S.batches.filter((b) => b.rifleId === r.id).length, bits = [];
+  if (nG) bits.push(`${nG} group${nG === 1 ? '' : 's'}`);
+  if (nH) bits.push(`${nH} historical entr${nH === 1 ? 'y' : 'ies'}`);
+  if (nB) bits.push(`${nB} batch${nB === 1 ? '' : 'es'}`);
+  return bits.length ? `Has data (${bits.join(', ')}). Archive it instead (menu > Archive).` : '';
+}
+async function setRifleArchived(rid, on) {
+  const r = byId('rifles', rid); if (!r) return;
+  if (on && !confirm(`Archive "${r.name}"? It leaves the main page, every firearm pick-list and the low-stock warnings, and opens view-only. Nothing is deleted. You can restore it any time.`)) return;
+  await put('rifles', { ...r, archived: on }); toast(on ? 'Archived' : 'Restored'); render();
+}
+function viewArchive() {
+  bar(back('#/', 'Firearms', true), 'Archive');
+  const sorted = S.rifles.slice().sort((a, b) => a.name.localeCompare(b.name));
+  const row = (r) => `<div class="card"><div class="row sb"><a href="#/rifle/${r.id}" style="color:inherit;flex:1"><b style="font-size:18px">${esc(r.name)}</b><div class="muted">${r.type === 'pistol' ? 'Pistol · ' : 'Rifle · '}${esc(calName(r.caliberId))} · ${S.groups.filter((g) => g.rifleId === r.id).length} groups</div></a>
+    <button class="btn sm" data-act="${r.archived ? 'rifle-restore' : 'rifle-archive'}" data-id="${r.id}">${r.archived ? 'Restore' : 'Archive'}</button></div></div>`;
+  const act1 = sorted.filter((r) => !r.archived), arc = sorted.filter((r) => r.archived);
+  main(`<h1>Archive</h1>
+    <div class="muted">Archiving hides a firearm from the main page, every firearm pick-list and the low-stock warnings. Its groups, sessions, batches and inventory history are never changed. An archived firearm opens view-only until you restore it.</div>
+    <h2>Active</h2>${act1.length ? act1.map(row).join('') : '<div class="card muted">No active firearms.</div>'}
+    <h2>Archived</h2>${arc.length ? arc.map(row).join('') : '<div class="card muted">Nothing archived.</div>'}`);
+}
 function rifleForm(r) {
   const hasGroups = !!r && S.groups.some((g) => g.rifleId === r.id);
   formDialog(r ? 'Edit firearm' : 'New firearm', [
@@ -438,10 +467,10 @@ function rifleForm(r) {
   ], r ? { ...r, type: r.type === 'pistol' ? 'pistol' : 'rifle' } : { type: 'rifle' }, async (v) => {
     await put('rifles', { ...(r || { id: uid() }), name: v.name, type: hasGroups ? (r.type === 'pistol' ? 'pistol' : 'rifle') : (v.type === 'pistol' ? 'pistol' : 'rifle'), caliberId: v.caliberId, barrel: v.barrel, startRounds: v.startRounds ?? 0 });
   }, r ? async () => {
-    if (!confirm(`Delete "${r.name}" and ALL its groups? This cannot be undone.`)) return false;
-    for (const g of S.groups.filter((g2) => g2.rifleId === r.id)) await del('groups', g.id);
-    for (const s of sessionsOf(r.id)) await del('sessions', s.id);
-    for (const h of S.hist.filter((h2) => h2.rifleId === r.id)) await del('hist', h.id);
+    const why = rifleBlock(r);
+    if (why) { toast(why); return false; }
+    if (!confirm(`Delete "${r.name}"? It has no groups. This cannot be undone.`)) return false;
+    for (const s of sessionsOf(r.id)) await del('sessions', s.id); // only empty sessions can remain here
     await del('rifles', r.id);
     location.hash = '#/';
     return true;
@@ -503,7 +532,8 @@ function bestInfo(rid) {
 function viewRifle(rid) {
   const r = byId('rifles', rid);
   if (!r) return viewHome();
-  bar(back('#/', 'Firearms', true), r.name, `<button class="r" data-act="edit-rifle" data-id="${rid}">Edit</button>`);
+  const ar = !!r.archived;
+  bar(back(ar ? '#/archive' : '#/', ar ? 'Archive' : 'Firearms', true), r.name, ar ? '' : `<button class="r" data-act="edit-rifle" data-id="${rid}">Edit</button>`);
   const { cs, bd, qual, best, pistol, pcand, pb } = bestInfo(rid); // the Current Best Load pick (shared with the inventory low-stock check)
   const t = rifleTotals(rid);
   const latest = latestSession(rid);
@@ -513,7 +543,7 @@ function viewRifle(rid) {
       <div class="big mono">SD ${fmt(pb.vp.sd, 1)} fps</div><div class="mono">avg ${fin(pb.c.vel) ? Math.round(pb.c.vel) : '—'} fps · ES ${fmt(pb.vp.es, 0)} fps</div>
       ${pb.c.gsAvg !== null ? `<div class="mono">group avg ${fmt(pb.c.gsAvg, 2)}" · ${fmt(moa(pb.c.gsAvg, pb.c.distance), 2)} MOA</div>` : ''}<div style="opacity:.85;font-size:13px">Tap to see its groups →</div></a>`
     : `<div class="hero"><div class="lbl">Current best load · lowest velocity SD</div><div style="font-size:19px;font-weight:600">${pcand.length ? 'No unflagged load qualifies yet' : 'Not enough data yet'}</div><div>${pcand.length ? 'Every load with 2+ groups has an issue logged on it.' : 'Needs 2+ groups with the exact same Bullet + Powder + Charge + Primer + COAL + Distance, with velocity readings.'}</div></div>`;
-  main(`<div class="muted">${pistol ? 'Pistol · ' : ''}${esc(calName(r.caliberId))}${r.barrel ? ' · ' + r.barrel + ' in barrel' : ''}</div>
+  main(`${archBanner(rid)}<div class="muted">${pistol ? 'Pistol · ' : ''}${esc(calName(r.caliberId))}${r.barrel ? ' · ' + r.barrel + ' in barrel' : ''}</div>
     ${pistol ? pHero : best ? `<a class="hero" href="${comboHref(best)}"><div class="lbl">Current best load · ${bd} yd</div><div style="font-size:19px;font-weight:600">${esc(bl(best.bulletId))} · ${esc(nm('powders', best.powderId))}</div>
       <div class="mono">${best.charge} gn · ${esc(nm('primers', best.primerId))} · ${best.jump} thou jump</div>
       <div class="big mono">${fmt(best.mr)}"</div><div class="mono">MR ${fmt(best.mrMoa, 2)} MOA · ES ${fmt(best.esMoa, 2)} MOA</div><div style="opacity:.85;font-size:13px">Tap to see its groups →</div></a>`
@@ -522,14 +552,14 @@ function viewRifle(rid) {
     <div class="grid2"><div class="card"><div class="lbl">Shots logged</div><div class="mono v" style="font-size:30px">${t.shots}</div></div>
     <div class="card"><div class="lbl">Barrel total</div><div class="mono v" style="font-size:30px">${t.barrel}</div><div class="muted">${t.start} start + ${t.shots} logged + ${t.fouling} fouling</div></div></div>
     ${latest ? `<a class="card" href="#/session/${latest.id}"><div class="lbl">Current session · tap to open</div><div class="row sb"><b>${esc(sessionLabel(latest))}</b><span class="mono">${fin(latest.fouling) ? latest.fouling : 0} fouling · ${groupsOf(latest.id).length} grp</span></div></a>` : ''}
-    ${latest ? `<a class="btn dark" href="#/add/${rid}">+ Add New Group</a>` : ''}
-    <button class="btn ${latest ? '' : 'dark'}" data-act="new-session" data-id="${rid}">+ Start New Session</button>
+    ${ar ? '' : `${latest ? `<a class="btn dark" href="#/add/${rid}">+ Add New Group</a>` : ''}
+    <button class="btn ${latest ? '' : 'dark'}" data-act="new-session" data-id="${rid}">+ Start New Session</button>`}
     ${pistol ? '' : `<a class="btn" href="#/best/${rid}">Best Loads by Distance</a>
     <a class="btn" href="#/load/${rid}">Load Analysis</a>`}
     <a class="btn" href="#/sessions/${rid}">View Session Data</a>
     <a class="btn" href="#/all/${rid}">View All Data</a>
     <a class="btn" href="#/issues/${rid}">Excluded &amp; Flagged</a>
-    <button class="btn sm" data-act="set-case" data-id="${rid}">Set case for groups without one</button>`);
+    ${ar ? '' : `<button class="btn sm" data-act="set-case" data-id="${rid}">Set case for groups without one</button>`}`);
 }
 
 function viewAll(rid) {
@@ -549,14 +579,14 @@ function viewAll(rid) {
     const mine = gs.filter((g) => g.sessionId === se.id).sort((a, b) => a.ts - b.ts);
     if (filtering && !mine.length) return '';
     return `<div class="row sb" style="margin-top:6px"><div><b>${esc(sessionLabel(se))}</b><div class="muted">${fin(se.fouling) ? se.fouling : 0} fouling${fin(se.temp) ? ' · ' + se.temp + ' F' : ''}${se.wind ? ' · ' + esc(se.wind) : ''}</div></div>
-      <button class="btn sm" data-act="edit-session" data-id="${se.id}">Edit session</button></div>
+      ${r.archived ? '' : `<button class="btn sm" data-act="edit-session" data-id="${se.id}">Edit session</button>`}</div>
       ${mine.length ? mine.map((g) => groupCard(g)).join('') : '<div class="card muted">No groups in this session yet.</div>'}`;
   }).join('');
   const cs = combos(gs);
   const hist = S.hist.filter((h) => h.rifleId === rid);
   const hmap = new Map();
   for (const h of hist) { const k = [h.bulletId, h.powderId, h.charge].join('|'); if (!hmap.has(k)) hmap.set(k, []); hmap.get(k).push(h); }
-  main(`<div class="grid2">
+  main(`${archBanner(rid)}<div class="grid2">
     ${sel('powder', 'Powder', opts(used('powderId', 'powders'), F.powder, (x) => x.name, 'All'))}
     ${sel('bullet', 'Bullet', opts(used('bulletId', 'bullets'), F.bullet, (x) => x.name + (fin(x.weight) ? ' ' + x.weight : ''), 'All'))}
     ${sel('primer', 'Primer', opts(used('primerId', 'primers'), F.primer, (x) => x.name, 'All'))}
@@ -571,8 +601,8 @@ function viewAll(rid) {
     <div class="muted">Pre-existing data without X/Y. Kept separate — never mixed into mean-radius stats.</div>
     ${[...hmap.values()].map((arr) => { const es = arr.filter((h) => fin(h.es)); const avg = es.length ? es.reduce((a, h) => a + h.es, 0) / es.length : null;
       return `<div class="card"><b>${esc(bl(arr[0].bulletId))} · ${esc(nm('powders', arr[0].powderId))} ${arr[0].charge} gn</b><div class="kv"><span>Reference avg ES (${es.length} entr${es.length === 1 ? 'y' : 'ies'})</span><b>${fmt(avg)}"</b></div>
-      ${arr.map((h) => `<div class="row sb muted"><span>${esc(h.note || '—')} · ES ${fmt(h.es)}</span><button class="btn sm" data-act="edit-hist" data-id="${h.id}">Edit</button></div>`).join('')}</div>`; }).join('')}
-    <button class="btn" data-act="new-hist" data-id="${rid}">+ Add historical entry</button>`}`);
+      ${arr.map((h) => `<div class="row sb muted"><span>${esc(h.note || '—')} · ES ${fmt(h.es)}</span>${r.archived ? '' : `<button class="btn sm" data-act="edit-hist" data-id="${h.id}">Edit</button>`}</div>`).join('')}</div>`; }).join('')}
+    ${r.archived ? '' : `<button class="btn" data-act="new-hist" data-id="${rid}">+ Add historical entry</button>`}`}`);
 }
 
 const newest = (a, b) => b.date.localeCompare(a.date) || b.ts - a.ts;
@@ -586,8 +616,8 @@ function viewSessions(rid) {
     const gs = groupsOf(se.id);
     return `<a class="card" href="#/session/${se.id}"><div class="row sb"><b>${esc(sessionLabel(se))}</b><span class="mono">${gs.length} grp · ${gs.reduce((a, g) => a + g.shots.length, 0)} shots</span></div><div class="muted">${sessMeta(se)}</div></a>`;
   }).join('');
-  main(`<h1>Sessions</h1>${list || '<div class="card muted">No sessions yet.</div>'}
-    <button class="btn dark" data-act="new-session" data-id="${rid}">+ Start New Session</button>`);
+  main(`${archBanner(rid)}<h1>Sessions</h1>${list || '<div class="card muted">No sessions yet.</div>'}
+    ${r.archived ? '' : `<button class="btn dark" data-act="new-session" data-id="${rid}">+ Start New Session</button>`}`);
 }
 
 function viewSession(sid, hlId) {
@@ -595,13 +625,13 @@ function viewSession(sid, hlId) {
   if (!se) return viewHome();
   const rid = se.rifleId, gs = groupsOf(sid);
   const shots = gs.reduce((a, g) => a + g.shots.length, 0);
-  bar(back('#/sessions/' + rid, 'Sessions'), 'Session · ' + se.date, `<button class="r" data-act="edit-session" data-id="${sid}">Edit</button>`, rid);
-  main(`<div><h1 style="font-size:24px">${esc(sessionLabel(se))}</h1><div class="muted">${sessMeta(se)}</div></div>
+  bar(back('#/sessions/' + rid, 'Sessions'), 'Session · ' + se.date, isArch(rid) ? '' : `<button class="r" data-act="edit-session" data-id="${sid}">Edit</button>`, rid);
+  main(`${archBanner(rid)}<div><h1 style="font-size:24px">${esc(sessionLabel(se))}</h1><div class="muted">${sessMeta(se)}</div></div>
     <div class="grid3"><div class="card"><div class="lbl">Groups</div><span class="mono v">${gs.length}</span></div>
     <div class="card"><div class="lbl">Shots</div><span class="mono v">${shots}</span></div>
     <div class="card"><div class="lbl">Since clean</div><span class="mono v">${(fin(se.fouling) ? se.fouling : 0) + shots}</span></div></div>
     <div class="muted" style="margin-top:-6px">Since clean = rounds since clean at the end of this session (fouling shots + every shot fired).</div>
-    <a class="btn dark" href="#/add/${sid}">+ Add Group to this session</a>
+    ${isArch(rid) ? '' : `<a class="btn dark" href="#/add/${sid}">+ Add Group to this session</a>`}
     <h2>Groups · in the order fired</h2>
     ${gs.length ? gs.map((g) => groupCard(g, false, g.id === hlId)).join('') : '<div class="card muted">No groups in this session yet.</div>'}`);
 }
@@ -836,11 +866,11 @@ function lcResult() {
 }
 function viewLoadCheck() {
   bar(back('#/tools', 'Tools', true), 'Load check');
-  if (!byId('rifles', LC.rid)) LC.rid = (S.rifles[0] || {}).id || '';
+  if (!byId('rifles', LC.rid) || isArch(LC.rid)) LC.rid = (liveRifles()[0] || {}).id || '';
   const pistol = isPistol(LC.rid);
   main(`<h1>Load check</h1>
     <div class="muted">Before you build a load: does it match an issue you logged on this firearm? Leave primer or ${pistol ? 'COAL' : 'jump'} blank to match any.</div>
-    <div class="f"><label class="lbl" for="lc-rid">Firearm</label><select class="in" id="lc-rid">${opts(S.rifles, LC.rid, (x) => x.name)}</select></div>
+    <div class="f"><label class="lbl" for="lc-rid">Firearm</label><select class="in" id="lc-rid">${opts(liveRifles(), LC.rid, (x) => x.name)}</select></div>
     <div class="f"><label class="lbl" for="lc-bullet">Bullet</label><select class="in" id="lc-bullet">${opts(act(S.bullets), LC.bullet, (x) => x.name + (fin(x.weight) ? ' ' + x.weight + ' gn' : ''), '— pick a bullet —')}</select></div>
     <div class="f"><label class="lbl" for="lc-powder">Powder</label><select class="in" id="lc-powder">${opts(act(S.powders), LC.powder, (x) => x.name, '— pick a powder —')}</select></div>
     <div class="grid2"><div class="f"><label class="lbl" for="lc-charge">Charge (gn)</label><input class="in m" id="lc-charge" inputmode="decimal" value="${esc(LC.charge)}"></div>
@@ -878,7 +908,7 @@ const lowLimit = () => (fin(invPrefs().low) && invPrefs().low >= 0 ? invPrefs().
 function lowStock() {
   const lim = lowLimit(), out = new Map();
   if (!(lim > 0)) return out;
-  for (const r of S.rifles) {
+  for (const r of liveRifles()) { // archived firearms are skipped
     const info = bestInfo(r.id), c = info.pistol ? (info.pb && info.pb.c) : info.best;
     if (!c) continue;
     for (const [kind, id, per] of [['bullet', c.bulletId, 1], ['primer', c.primerId, 1], ['powder', c.powderId, Number(c.charge)]]) {
@@ -1059,13 +1089,13 @@ function ibSummaryHtml(r, title) {
 function viewBatch() {
   bar(back('#/components', 'Components', true), 'Log loaded batch');
   if (!IB.date) IB.date = today();
-  if (IB.rid && !byId('rifles', IB.rid)) IB.rid = '';
+  if (IB.rid && (!byId('rifles', IB.rid) || isArch(IB.rid))) IB.rid = '';
   const caseList = IB.rid && !IB.all ? casesFor(IB.rid, IB.case) : act(S.cases, IB.case);
   const loads = IB.rid ? loggedLoads(IB.rid) : [];
   const sel = (kind, label, list) => `<div class="f"><label class="lbl" for="ib-${kind}">${label}</label><select class="in" id="ib-${kind}">${opts(list, IB[kind], (x) => x.name + (kind === 'bullet' && fin(x.weight) ? ' ' + x.weight + ' gn' : ''), '— none —')}</select></div>`;
   main(`<h1>Log loaded batch</h1>
     <div class="muted">Records the components you used up loading a batch of rounds. It never changes group shot counts or fouling shots.</div>
-    <div class="f"><label class="lbl" for="ib-rid">Firearm · optional</label><select class="in" id="ib-rid">${opts(S.rifles, IB.rid, (x) => x.name, 'No firearm')}</select></div>
+    <div class="f"><label class="lbl" for="ib-rid">Firearm · optional</label><select class="in" id="ib-rid">${opts(liveRifles(), IB.rid, (x) => x.name, 'No firearm')}</select></div>
     ${IB.rid && loads.length ? `<div class="f"><label class="lbl" for="ib-load">Logged load</label><select class="in" id="ib-load"><option value="">— pick a load —</option>${loads.map(([k, g]) => `<option value="${esc(k)}"${IB.load === k ? ' selected' : ''}>${esc(bl(g.bulletId))} · ${esc(nm('powders', g.powderId))} ${g.charge} gn · ${esc(nm('primers', g.primerId))}</option>`).join('')}</select><div class="muted">Fills the parts below. Change any of them by hand.</div></div>` : ''}
     ${sel('bullet', 'Bullet', act(S.bullets, IB.bullet))}${sel('powder', 'Powder', act(S.powders, IB.powder))}
     <div class="f"><label class="lbl" for="ib-charge">Charge (gn)</label><input class="in m" id="ib-charge" inputmode="decimal" value="${esc(IB.charge)}"></div>
@@ -1217,13 +1247,13 @@ function ccManualHtml(kind) {
 }
 function viewCostCalc() {
   bar(back('#/tools', 'Tools', true), 'Load cost');
-  if (CC.rid && !byId('rifles', CC.rid)) CC.rid = '';
+  if (CC.rid && (!byId('rifles', CC.rid) || isArch(CC.rid))) CC.rid = '';
   const caseList = CC.rid && !CC.all ? casesFor(CC.rid, CC.case) : act(S.cases, CC.case);
   const sel = (kind, label, list, extra = '') => `<div class="f"><label class="lbl" for="cc-${kind}">${label}</label><select class="in" id="cc-${kind}">${opts(list, CC[kind], (x) => x.name + (kind === 'bullet' && fin(x.weight) ? ' ' + x.weight + ' gn' : ''), '— pick —')}<option value="${MAN}"${CC[kind] === MAN ? ' selected' : ''}>Manual…</option></select>${extra}</div>${CC[kind] === MAN ? ccManualHtml(kind) : ''}`;
   const loads = CC.rid ? (() => { const m = new Map(); for (const g of S.groups.filter((x) => x.rifleId === CC.rid).sort((a, b) => b.ts - a.ts)) { const k = [g.bulletId, g.powderId, Number(g.charge), g.primerId].join('|'); if (!m.has(k)) m.set(k, g); } return [...m.entries()]; })() : [];
   main(`<h1>Load cost</h1>
     <div class="muted">Cost per round from your library prices (before tax, plus tax). One bullet, one primer and one case per round. Display only: nothing here affects your data or rankings.</div>
-    <div class="f"><label class="lbl" for="cc-rid">Firearm · optional (filters the case list, enables the shortcut)</label><select class="in" id="cc-rid">${opts(S.rifles, CC.rid, (x) => x.name, 'No firearm')}</select></div>
+    <div class="f"><label class="lbl" for="cc-rid">Firearm · optional (filters the case list, enables the shortcut)</label><select class="in" id="cc-rid">${opts(liveRifles(), CC.rid, (x) => x.name, 'No firearm')}</select></div>
     ${CC.rid && loads.length ? `<div class="f"><label class="lbl" for="cc-fill">Fill from a logged load</label><select class="in" id="cc-fill"><option value="">— pick a load —</option>${loads.map(([k, g]) => `<option value="${esc(k)}">${esc(bl(g.bulletId))} · ${esc(nm('powders', g.powderId))} ${g.charge} gn · ${esc(nm('primers', g.primerId))}</option>`).join('')}</select></div>` : ''}
     ${sel('bullet', 'Bullet', act(S.bullets, CC.bullet))}
     ${sel('powder', 'Powder', act(S.powders, CC.powder))}
@@ -1384,9 +1414,9 @@ function plotSVG(g, s) {
 // Pistol group detail: manual group size + velocity stats only (no X/Y plot, POA, jump, mean radius or calculated ES).
 function viewGroupPistol(g) {
   const s = gstats(g), se = sessOf(g) || {}, gid = g.id;
-  bar(back('#/session/' + g.sessionId + '?g=' + gid, 'Session'), 'Group · ' + gdate(g), `<a class="r" href="#/edit/${gid}">Edit</a>`, g.rifleId);
+  bar(back('#/session/' + g.sessionId + '?g=' + gid, 'Session'), 'Group · ' + gdate(g), isArch(g.rifleId) ? '' : `<a class="r" href="#/edit/${gid}">Edit</a>`, g.rifleId);
   const sess = groupsOf(g.sessionId);
-  main(`<div><h1 style="font-size:24px">${esc(se.id ? sessionLabel(se) : '—')} · Group ${sess.findIndex((x) => x.id === g.id) + 1}</h1>
+  main(`${archBanner(g.rifleId)}<div><h1 style="font-size:24px">${esc(se.id ? sessionLabel(se) : '—')} · Group ${sess.findIndex((x) => x.id === g.id) + 1}</h1>
     <div class="muted">${esc(bl(g.bulletId))} · ${esc(nm('powders', g.powderId))} ${g.charge} gn · ${esc(nm('primers', g.primerId))} · COAL ${fin(g.coal) ? g.coal + '"' : '—'} · ${fin(g.distance) ? g.distance + ' yd' : 'no distance'}</div>
     ${caseLine(g)}
     <div class="row" style="margin-top:6px">${g.include === false ? '<span class="tag a">Excluded from analysis</span>' : '<span class="tag g">Included</span>'}${g.reference ? '<span class="tag g">Reference group</span>' : ''}</div></div>
@@ -1403,13 +1433,13 @@ function viewGroupPistol(g) {
       <div class="muted">${fin(se.temp) ? se.temp + ' F · ' : ''}${esc(se.wind || 'no wind noted')}</div>
       <div class="kv"><span>Session fouling shots</span><b>${fin(se.fouling) ? se.fouling : 0}</b></div>
       <div class="kv"><span>Rounds since clean (at start of group)</span><b>${roundsSinceClean(g) ?? '—'}</b></div></a>
-      <button class="btn sm" data-act="edit-session" data-id="${g.sessionId}">Edit session</button></div>
+      ${isArch(g.rifleId) ? '' : `<button class="btn sm" data-act="edit-session" data-id="${g.sessionId}">Edit session</button>`}</div>
     ${costCard(g)}
     <div class="card"><div class="lbl">Shots</div><table><thead><tr><th>#</th><th>Velocity (fps)</th></tr></thead><tbody>
       ${g.shots.map((p, i) => `<tr><td>${i + 1}</td><td>${fin(p.v) ? p.v : '—'}</td></tr>`).join('')}</tbody></table></div>
     ${g.notes ? `<div class="card"><div class="lbl">Notes</div>${esc(g.notes)}</div>` : ''}
-    <a class="btn dark" href="#/add/${g.sessionId}?from=${g.id}">+ Add another group (same session &amp; load)</a>
-    <button class="btn danger" data-act="del-group" data-id="${g.id}">Delete group</button>`);
+    ${isArch(g.rifleId) ? '' : `<a class="btn dark" href="#/add/${g.sessionId}?from=${g.id}">+ Add another group (same session &amp; load)</a>
+    <button class="btn danger" data-act="del-group" data-id="${g.id}">Delete group</button>`}`);
 }
 
 function viewGroup(gid) {
@@ -1418,9 +1448,9 @@ function viewGroup(gid) {
   if (isPistol(g.rifleId)) return viewGroupPistol(g);
   const s = gstats(g);
   const se = sessOf(g) || {};
-  bar(back('#/session/' + g.sessionId + '?g=' + gid, 'Session'), 'Group · ' + gdate(g), `<a class="r" href="#/edit/${gid}">Edit</a>`, g.rifleId);
+  bar(back('#/session/' + g.sessionId + '?g=' + gid, 'Session'), 'Group · ' + gdate(g), isArch(g.rifleId) ? '' : `<a class="r" href="#/edit/${gid}">Edit</a>`, g.rifleId);
   const sess = groupsOf(g.sessionId);
-  main(`<div><h1 style="font-size:24px">${esc(se.id ? sessionLabel(se) : '—')} · Group ${sess.findIndex((x) => x.id === g.id) + 1}</h1>
+  main(`${archBanner(g.rifleId)}<div><h1 style="font-size:24px">${esc(se.id ? sessionLabel(se) : '—')} · Group ${sess.findIndex((x) => x.id === g.id) + 1}</h1>
     <div class="muted">${esc(bl(g.bulletId))} · ${esc(nm('powders', g.powderId))} ${g.charge} gn · ${esc(nm('primers', g.primerId))} · ${g.jump} thou · ${fin(g.distance) ? g.distance + ' yd' : 'no distance'}</div>
     ${caseLine(g)}
     <div class="row" style="margin-top:6px">${g.include === false ? '<span class="tag a">Excluded from analysis</span>' : '<span class="tag g">Included</span>'}${g.reference ? '<span class="tag g">Reference group</span>' : ''}</div></div>
@@ -1448,13 +1478,13 @@ function viewGroup(gid) {
       <div class="kv"><span>Session fouling shots</span><b>${fin(se.fouling) ? se.fouling : 0}</b></div>
       <div class="kv"><span>Rounds since clean (at start of group)</span><b>${roundsSinceClean(g) ?? '—'}</b></div></a>
       <div class="kv"><span>COAL / trimmed length</span><b>${fin(g.coal) ? g.coal : '—'} / ${fin(g.trim) ? g.trim : '—'}</b></div>
-      <button class="btn sm" data-act="edit-session" data-id="${g.sessionId}">Edit session</button></div>
+      ${isArch(g.rifleId) ? '' : `<button class="btn sm" data-act="edit-session" data-id="${g.sessionId}">Edit session</button>`}</div>
     ${costCard(g)}
     <div class="card"><div class="lbl">Shots</div><table><thead><tr><th>#</th><th>Vel</th><th>X</th><th>Y</th><th>Rad</th></tr></thead><tbody>
       ${g.shots.map((p, i) => `<tr><td>${i + 1}</td><td>${fin(p.v) ? p.v : '—'}</td><td>${sfmt(p.x)}</td><td>${sfmt(p.y)}</td><td>${fin(p.x) && fin(p.y) && s.cx !== null ? fmt(Math.hypot(p.x - s.cx, p.y - s.cy)) : '—'}</td></tr>`).join('')}</tbody></table></div>
     ${g.notes ? `<div class="card"><div class="lbl">Notes</div>${esc(g.notes)}</div>` : ''}
-    <a class="btn dark" href="#/add/${g.sessionId}?from=${g.id}">+ Add another group (same session &amp; load)</a>
-    <button class="btn danger" data-act="del-group" data-id="${g.id}">Delete group</button>`);
+    ${isArch(g.rifleId) ? '' : `<a class="btn dark" href="#/add/${g.sessionId}?from=${g.id}">+ Add another group (same session &amp; load)</a>
+    <button class="btn danger" data-act="del-group" data-id="${g.id}">Delete group</button>`}`);
 }
 
 function shotRow(i, p = {}) {
@@ -1790,7 +1820,7 @@ function sessionForm(rid, se) {
 function viewSettings() {
   bar(back('#/', 'Firearms', true), 'Settings');
   const lib = (title, s, sub) => `<h2 class="row sb" style="align-items:center">${title}<button class="btn sm" data-act="lib-new" data-s="${s}">+ Add</button></h2>
-    ${S[s].slice().sort((a, b) => a.name.localeCompare(b.name)).map((x) => `<div class="item" role="button" tabindex="0" data-act="lib-edit" data-s="${s}" data-id="${x.id}"><div>${esc(x.name)}${sub(x) ? `<small>${esc(sub(x))}</small>` : ''}</div><span class="muted">Edit</span></div>`).join('') || '<div class="muted">None yet.</div>'}`;
+    ${S[s].filter((x) => !x.archived).sort((a, b) => a.name.localeCompare(b.name)).map((x) => `<div class="item" role="button" tabindex="0" data-act="lib-edit" data-s="${s}" data-id="${x.id}"><div>${esc(x.name)}${sub(x) ? `<small>${esc(sub(x))}</small>` : ''}</div><span class="muted">Edit</span></div>`).join('') || '<div class="muted">None yet.</div>'}`;
   main(`<h1>Settings</h1>
     ${lib('CALIBERS', 'calibers', () => '')}
     <div class="muted" style="margin-top:-4px">Add a caliber once (e.g. ".308 Win"), then pick it on each firearm and each bullet. A firearm only offers bullets of its own caliber.</div>
@@ -1881,6 +1911,7 @@ function render() {
     else if (p[0] === 'all') viewAll(p[1]);
     else if (p[0] === 'tools') { if (p[1] === 'crimp') viewCrimp(); else if (p[1] === 'loadcheck') viewLoadCheck(); else if (p[1] === 'cost') viewCostCalc(); else viewTools(); }
     else if (p[0] === 'components') { if (p[1] === 'item') viewComponentItem(p[2], p[3]); else if (p[1] === 'batch') viewBatch(); else if (p[1] === 'history') viewInvHistory(); else viewComponents(); }
+    else if (p[0] === 'archive') viewArchive();
     else if (p[0] === 'issues') viewIssues(p[1]);
     else if (p[0] === 'best') viewBest(p[1]);
     else if (p[0] === 'load') viewLoad(p[1]);
@@ -1890,11 +1921,13 @@ function render() {
     else if (p[0] === 'add') {
       let se = byId('sessions', p[1]); // #/add/<sessionId>; a rifle id means "latest session"
       if (!se && byId('rifles', p[1])) se = latestSession(p[1]);
-      if (se) viewGroupForm(se.rifleId, null, q.get('from'), se.id);
+      const arid = se ? se.rifleId : p[1];
+      if (isArch(arid)) { navTo('#/rifle/' + arid, true); toast('Archived firearm: restore it to add or edit'); }
+      else if (se) viewGroupForm(se.rifleId, null, q.get('from'), se.id);
       else if (byId('rifles', p[1])) { navTo('#/rifle/' + p[1], true); toast('Start a session first'); }
       else viewHome();
     }
-    else if (p[0] === 'edit') { const g = byId('groups', p[1]); g ? viewGroupForm(g.rifleId, g.id) : viewHome(); }
+    else if (p[0] === 'edit') { const g = byId('groups', p[1]); if (g && isArch(g.rifleId)) { navTo('#/group/' + g.id, true); toast('Archived firearm: restore it to add or edit'); } else if (g) viewGroupForm(g.rifleId, g.id); else viewHome(); }
     else if (p[0] === 'group') viewGroup(p[1]);
     else if (p[0] === 'settings') viewSettings();
     else viewHome();
@@ -1945,12 +1978,14 @@ document.addEventListener('click', (e) => {
   if (!t) return;
   const a = t.dataset.act, id = t.dataset.id;
   if (a === 'new-rifle') rifleForm(null);
-  else if (a === 'edit-rifle') rifleForm(byId('rifles', id));
+  else if (a === 'edit-rifle') { if (!viewOnly(id)) rifleForm(byId('rifles', id)); }
+  else if (a === 'rifle-archive') setRifleArchived(id, true);
+  else if (a === 'rifle-restore') setRifleArchived(id, false);
   else if (a === 'lib-new') libForm(t.dataset.s, null);
-  else if (a === 'lib-edit') { if (t.dataset.s === 'rifles') rifleForm(byId('rifles', id)); else libForm(t.dataset.s, byId(t.dataset.s, id)); }
-  else if (a === 'new-hist') histForm(id, null);
-  else if (a === 'edit-hist') histForm(byId('hist', id).rifleId, byId('hist', id));
-  else if (a === 'del-group') deleteGroup(id);
+  else if (a === 'lib-edit') { if (t.dataset.s === 'rifles') { if (!viewOnly(id)) rifleForm(byId('rifles', id)); } else libForm(t.dataset.s, byId(t.dataset.s, id)); }
+  else if (a === 'new-hist') { if (!viewOnly(id)) histForm(id, null); }
+  else if (a === 'edit-hist') { if (!viewOnly(byId('hist', id).rifleId)) histForm(byId('hist', id).rifleId, byId('hist', id)); }
+  else if (a === 'del-group') { if (!viewOnly((byId('groups', id) || {}).rifleId)) deleteGroup(id); }
   else if (a === 'theme') { try { localStorage.setItem('theme', t.dataset.v); } catch (err) { /* private mode: applies for this visit only */ } applyTheme(t.dataset.v); viewAllKeepScroll(); }
   else if (a === 'accent') { try { localStorage.setItem('accent', t.dataset.v); } catch (err) { /* private mode: applies for this visit only */ } applyTheme(themePref(), t.dataset.v); viewAllKeepScroll(); }
   else if (a === 'go') { if (!e.target.closest('a')) location.hash = t.dataset.href; }
@@ -1966,7 +2001,7 @@ document.addEventListener('click', (e) => {
   else if (a === 'cm-restore') cmArchive(t.dataset.k, id, false);
   else if (a === 'lib-delete') libDelete(t.dataset.k, id);
   else if (a === 'ib-save') ibConfirm();
-  else if (a === 'set-case') setCaseBulk(id);
+  else if (a === 'set-case') { if (!viewOnly(id)) setCaseBulk(id); }
   else if (a === 'menu') { const m = $('#menu'); m.hidden = !m.hidden; t.setAttribute('aria-expanded', String(!m.hidden)); }
   else if (a === 'cr-pass') { CR.pass = Number(t.dataset.p); crSave(); viewAllKeepScroll(); window.scrollTo(0, 0); }
   else if (a === 'cr-n') {
@@ -1975,8 +2010,8 @@ document.addEventListener('click', (e) => {
     CR.pass = Math.min(CR.pass, CR.n); crSave(); viewAllKeepScroll();
   }
   else if (a === 'cr-clear') { if (confirm('Clear all entered COAL values? Rounds and tolerance stay.')) { CR.vals = {}; CR.pass = 1; crSave(); render(); } }
-  else if (a === 'new-session') sessionForm(id, null);
-  else if (a === 'edit-session') { const se = byId('sessions', id); if (se) sessionForm(se.rifleId, se); }
+  else if (a === 'new-session') { if (!viewOnly(id)) sessionForm(id, null); }
+  else if (a === 'edit-session') { const se = byId('sessions', id); if (se && !viewOnly(se.rifleId)) sessionForm(se.rifleId, se); }
   else if (a === 'apply-update') { if (updateWorker) updateWorker.postMessage({ type: 'SKIP_WAITING' }); }
   else if (a === 'snooze') { S.cfg.snooze = Date.now() + 864e5; saveCfg(); renderBanners(); }
   else if (a === 'export') exportData();
