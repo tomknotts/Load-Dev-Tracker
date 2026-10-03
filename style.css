@@ -163,3 +163,17 @@ details.unproven summary{min-height:44px;display:flex;align-items:center;cursor:
 
 /* group forms: side-by-side fields line up by their bottoms, so a label that wraps to two lines no longer pushes its box down */
 #gform .grid2{align-items:end}
+.segc{display:grid;grid-template-columns:repeat(4,minmax(0,1fr))}
+.segc button{min-height:48px;padding:0 2px;font:inherit;font-size:15px;font-weight:700;color:var(--ink);background:var(--field);border:2px solid var(--line2)}
+.segc button:not(:first-child){border-left:0}
+.segc button:first-child{border-radius:10px 0 0 10px}
+.segc button:last-child{border-radius:0 10px 10px 0}
+.segc button[aria-pressed=true]{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+.segc button:focus-visible{outline:3px solid var(--accent-ring);outline-offset:1px}
+details.sec{margin-top:6px}
+details.sec>:not(summary){margin-top:12px}
+details.sec>summary{min-height:48px;display:flex;align-items:center;cursor:pointer;font-weight:700;font-size:17px;border-bottom:2px solid var(--line2);list-style:none}
+details.sec>summary::-webkit-details-marker{display:none}
+details.sec>summary::after{content:'▾';margin-left:auto;color:var(--mute)}
+details.sec:not([open])>summary::after{content:'▸'}
+details.sec[open]>summary{margin-bottom:0}

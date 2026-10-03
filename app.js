@@ -1,5 +1,5 @@
 'use strict';
-const APP_VERSION = 'v20'; // keep in step with CACHE in sw.js (shown in Settings > About so you can tell which copy a browser is running)
+const APP_VERSION = 'v21'; // keep in step with CACHE in sw.js (shown in Settings > About so you can tell which copy a browser is running)
 /* ---------- helpers ---------- */
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
@@ -114,11 +114,14 @@ async function put(s, o) {
 }
 async function del(s, id) { await rp(store(s, 'readwrite').delete(id)); S[s] = S[s].filter((x) => x.id !== id); }
 const byId = (s, id) => S[s].find((x) => x.id === id);
+// Archived library items (bullets, powders, primers, cases; `archived` is true only when set, so old data and old exports read as active) are left out of every
+// pick-list. keepId keeps the item already chosen on a record being edited, so editing never silently swaps it.
+const act = (list, keepId) => list.filter((x) => !x.archived || x.id === keepId);
 
 async function exportData() {
   const data = {};
   for (const s of STORES) data[s] = S[s];
-  const blob = new Blob([JSON.stringify({ app: '308-load-dev-tracker', version: 8, exported: new Date().toISOString(), data }, null, 2)], { type: 'application/json' });
+  const blob = new Blob([JSON.stringify({ app: '308-load-dev-tracker', version: 9, exported: new Date().toISOString(), data }, null, 2)], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = `load-dev-backup-${today()}.json`;
@@ -838,11 +841,11 @@ function viewLoadCheck() {
   main(`<h1>Load check</h1>
     <div class="muted">Before you build a load: does it match an issue you logged on this firearm? Leave primer or ${pistol ? 'COAL' : 'jump'} blank to match any.</div>
     <div class="f"><label class="lbl" for="lc-rid">Firearm</label><select class="in" id="lc-rid">${opts(S.rifles, LC.rid, (x) => x.name)}</select></div>
-    <div class="f"><label class="lbl" for="lc-bullet">Bullet</label><select class="in" id="lc-bullet">${opts(S.bullets, LC.bullet, (x) => x.name + (fin(x.weight) ? ' ' + x.weight + ' gn' : ''), '— pick a bullet —')}</select></div>
-    <div class="f"><label class="lbl" for="lc-powder">Powder</label><select class="in" id="lc-powder">${opts(S.powders, LC.powder, (x) => x.name, '— pick a powder —')}</select></div>
+    <div class="f"><label class="lbl" for="lc-bullet">Bullet</label><select class="in" id="lc-bullet">${opts(act(S.bullets), LC.bullet, (x) => x.name + (fin(x.weight) ? ' ' + x.weight + ' gn' : ''), '— pick a bullet —')}</select></div>
+    <div class="f"><label class="lbl" for="lc-powder">Powder</label><select class="in" id="lc-powder">${opts(act(S.powders), LC.powder, (x) => x.name, '— pick a powder —')}</select></div>
     <div class="grid2"><div class="f"><label class="lbl" for="lc-charge">Charge (gn)</label><input class="in m" id="lc-charge" inputmode="decimal" value="${esc(LC.charge)}"></div>
     <div class="f"><label class="lbl" for="lc-jump">${pistol ? 'COAL (in) · optional' : 'Jump (thou) · optional'}</label><input class="in m" id="lc-jump" inputmode="decimal" value="${esc(LC.jump)}"></div></div>
-    <div class="f"><label class="lbl" for="lc-primer">Primer · optional</label><select class="in" id="lc-primer">${opts(S.primers, LC.primer, (x) => x.name, 'Any primer')}</select></div>
+    <div class="f"><label class="lbl" for="lc-primer">Primer · optional</label><select class="in" id="lc-primer">${opts(act(S.primers), LC.primer, (x) => x.name, 'Any primer')}</select></div>
     <div id="lc-out">${lcResult()}</div>`);
 }
 /* ---------- Components inventory (informational only: never feeds pooling, ranking, best load, issue flags, cost or any statistic) ----------
@@ -880,6 +883,8 @@ function lowStock() {
     if (!c) continue;
     for (const [kind, id, per] of [['bullet', c.bulletId, 1], ['primer', c.primerId, 1], ['powder', c.powderId, Number(c.charge)]]) {
       if (!isTracked(kind, id) || !(per > 0)) continue;
+      const it = byId(INV[kind].store, id);
+      if (it && it.archived) continue; // archived items are never flagged
       const have = onHand(kind, id);
       if (have < 0) continue;
       const rounds = Math.floor(have / per);
@@ -895,23 +900,57 @@ function lowLine(rid) { // small yellow notice on the firearm page
   return rows.length ? `<a class="card excl" href="#/components"><div class="lbl">Running low · best load</div>${rows.map((t) => `<div>${esc(t)}</div>`).join('')}<div class="muted">Tap for Components</div></a>` : '';
 }
 
+/* Components page: the four libraries (bullets, powders, primers, cases), one list at a time. Each item's own page holds its specs and cost,
+   its stock and history, and Archive / Delete. Archived items stay in the data (and on old groups) but leave every pick-list and the low-stock flags. */
+let CM = { sec: 'bullet', q: '', cal: '', arch: false };
+const CM_SECS = [['bullet', 'Bullets'], ['powder', 'Powders'], ['primer', 'Primers'], ['case', 'Cases']];
+function cmSpec(kind, it) {
+  if (kind === 'bullet') return [fin(it.weight) ? it.weight + ' gn' : '', it.style].filter(Boolean).join(' ');
+  if (kind === 'primer') return it.type || '';
+  if (kind === 'case') return (it.caliberIds || []).map((id) => calName(id)).filter(Boolean).join(', ');
+  return '';
+}
+function cmCost(kind, it) { // computed cost per unit, with tax; '' when the price or quantity is missing
+  const rate = 1 + taxPct() / 100;
+  if (kind === 'powder') {
+    if (!hasNum(it.price) || !(Number(it.pkg) > 0)) return '';
+    return `$${((Number(it.price) + (hasNum(it.ship) ? Number(it.ship) : 0)) * rate / Number(it.pkg)).toFixed(2)}/${it.unit === 'kg' ? 'kg' : 'lb'}`;
+  }
+  const p = unitPre(kind, it);
+  return p === null ? '' : `$${(p * rate).toFixed(4)}/${kind === 'case' ? 'firing' : 'each'}`;
+}
+function cmListHtml() {
+  const kind = CM.sec, low = lowStock(), q = CM.q.trim().toLowerCase();
+  const list = S[INV[kind].store].filter((it) => (CM.arch || !it.archived)
+    && (!q || (it.name + ' ' + cmSpec(kind, it)).toLowerCase().includes(q))
+    && (!CM.cal || kind === 'powder' || kind === 'primer' || (kind === 'bullet' ? it.caliberId === CM.cal : (it.caliberIds || []).includes(CM.cal))))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  if (!list.length) return `<div class="card muted">${S[INV[kind].store].some((it) => CM.arch || !it.archived) ? 'Nothing matches.' : `No ${CM_SECS.find((s) => s[0] === kind)[1].toLowerCase()} yet. Tap + Add.`}</div>`;
+  return list.map((it) => {
+    const n = onHand(kind, it.id), neg = n < 0, lw = it.archived ? null : low.get(kind + '|' + it.id), tr = isTracked(kind, it.id);
+    const sub = [cmSpec(kind, it), cmCost(kind, it)].filter(Boolean).join(' · ');
+    return `<a class="card ${neg ? 'flag' : lw ? 'excl' : ''}" href="#/components/item/${kind}/${it.id}">
+      <div class="row sb"><b>${esc(it.name)}${it.archived ? ' <span class="tag">Archived</span>' : ''}</b><span class="mono v" ${neg ? 'style="color:var(--red)"' : ''}>${tr ? qtyText(kind, it, n) : '—'}</span></div>
+      <div class="muted">${sub ? esc(sub) : '&nbsp;'}</div>
+      ${neg ? '<div class="muted"><b style="color:var(--red)">Below zero</b></div>' : tr ? '' : '<div class="muted">nothing entered yet</div>'}
+      ${lw ? lw.map((l) => `<div class="warn">${esc(lowLineText(l))}</div>`).join('') : ''}</a>`;
+  }).join('');
+}
 function viewComponents() {
   bar(back('#/', 'Firearms', true), 'Components');
-  const low = lowStock(), lim = lowLimit();
-  const sect = (kind) => {
-    const list = S[INV[kind].store].slice().sort((a, b) => a.name.localeCompare(b.name));
-    return `<h2>${INV[kind].title}</h2>` + (list.length ? list.map((it) => {
-      const n = onHand(kind, it.id), neg = n < 0, lw = low.get(kind + '|' + it.id), tr = isTracked(kind, it.id);
-      return `<a class="card ${neg ? 'flag' : lw ? 'excl' : ''}" href="#/components/item/${kind}/${it.id}">
-        <div class="row sb"><b>${esc(invName(kind, it.id))}</b><span class="mono v" ${neg ? 'style="color:var(--red)"' : ''}>${qtyText(kind, it, n)}</span></div>
-        <div class="muted">${neg ? '<b style="color:var(--red)">Below zero</b> · ' : ''}${INV[kind].unit}${tr ? '' : ' · nothing entered yet'}</div>
-        ${lw ? lw.map((l) => `<div class="warn">${esc(lowLineText(l))}</div>`).join('') : ''}</a>`;
-    }).join('') : `<div class="card muted">No ${INV[kind].title.toLowerCase()} in the library yet. Add them in Settings.</div>`);
-  };
+  const kind = CM.sec, st = INV[kind].store, lim = lowLimit();
+  const calFilter = kind === 'bullet' || kind === 'case';
   main(`<h1>Components</h1>
     <div class="grid2"><a class="btn pri" href="#/components/batch">Log loaded batch</a><a class="btn" href="#/components/history">History</a></div>
-    <div class="muted">On hand is the sum of each item's events. Informational only: it never changes your stats, rankings or costs. Warning limit: ${lim ? lim + ' rounds' : 'off'} (Settings).</div>
-    ${['bullet', 'powder', 'primer', 'case'].map(sect).join('')}`);
+    <div class="segc" role="group" aria-label="Component type">${CM_SECS.map(([k, l]) => `<button type="button" data-act="cm-sec" data-v="${k}" aria-pressed="${k === kind}">${l}</button>`).join('')}</div>
+    <div class="row" style="gap:8px"><input class="in" id="cm-q" type="search" placeholder="Search ${esc(CM_SECS.find((s) => s[0] === kind)[1].toLowerCase())}" value="${esc(CM.q)}" autocomplete="off" style="flex:1"><button class="btn sm pri" data-act="lib-new" data-s="${st}">+ Add</button></div>
+    ${calFilter ? `<div class="f"><label class="lbl" for="cm-cal">Caliber</label><select class="in" id="cm-cal"><option value="">All calibers</option>${S.calibers.slice().sort((a, b) => a.name.localeCompare(b.name)).map((c) => `<option value="${esc(c.id)}"${CM.cal === c.id ? ' selected' : ''}>${esc(c.name)}</option>`).join('')}</select></div>` : ''}
+    <label class="row" style="min-height:44px"><input type="checkbox" id="cm-arch" style="width:24px;height:24px"${CM.arch ? ' checked' : ''}> Show archived</label>
+    <div id="cm-list">${cmListHtml()}</div>
+    <div class="muted">On hand is the sum of each item's events. Informational only: it never changes your stats, rankings or costs. Costs shown include tax. Warning limit: ${lim ? lim + ' rounds' : 'off'} (Settings).</div>
+    <h2>Consolidate</h2>
+    <div class="muted">Turns every item's history into one Starting count. Asks first and offers a backup.</div>
+    <button class="btn" data-act="inv-consolidate" style="border-color:var(--accent-text);color:var(--accent-text)">Consolidate all components</button>`);
 }
 
 function invEventCard(e, withItem) {
@@ -924,13 +963,53 @@ function viewComponentItem(kind, id) {
   const it = INV[kind] && byId(INV[kind].store, id);
   if (!it) return viewComponents();
   bar(back('#/components', 'Components', true), invName(kind, id), '', null);
-  const n = onHand(kind, id), lw = lowStock().get(kind + '|' + id), evs = evOf(kind, id).sort((a, b) => b.date.localeCompare(a.date) || b.ts - a.ts);
-  main(`<div class="muted">${INV[kind].title}</div>
-    <div class="card ${n < 0 ? 'flag' : lw ? 'excl' : ''}"><div class="lbl">On hand</div><div class="mono" style="font-size:30px;font-weight:600;${n < 0 ? 'color:var(--red)' : ''}">${qtyText(kind, it, n)}</div>
-      ${n < 0 ? '<div style="color:var(--red);font-weight:600">Below zero. Check your entries or recount.</div>' : ''}${lw ? lw.map((l) => `<div class="warn">${esc(lowLineText(l))}</div>`).join('') : ''}<div class="muted">The sum of the events below.</div></div>
-    <div class="grid2"><button class="btn pri" data-act="inv-add" data-k="${kind}" data-id="${id}" data-t="start">Starting count</button><button class="btn" data-act="inv-add" data-k="${kind}" data-id="${id}" data-t="purchase">Purchase</button>
-      <button class="btn" data-act="inv-add" data-k="${kind}" data-id="${id}" data-t="recount">Recount</button><button class="btn" data-act="inv-add" data-k="${kind}" data-id="${id}" data-t="used">Used (manual)</button></div>
-    <h2>History</h2>${evs.length ? evs.map((e) => invEventCard(e, false)).join('') : '<div class="card muted">No events yet. Add a starting count to begin.</div>'}`);
+  const st = INV[kind].store, n = onHand(kind, id), lw = it.archived ? null : lowStock().get(kind + '|' + id), evs = evOf(kind, id).sort((a, b) => b.date.localeCompare(a.date) || b.ts - a.ts);
+  const money2 = (v) => (hasNum(v) ? '$' + Number(v).toFixed(2) : '—');
+  const rows = {
+    bullet: [['Caliber', calName(it.caliberId) || '—'], ['Style', it.style || '—'], ['Weight', fin(it.weight) ? it.weight + ' gn' : '—'], ['Diameter', fin(it.diameter) ? it.diameter + ' in' : '—'], ['Price (before tax)', money2(it.price)], ['Quantity in the box', hasNum(it.qty) ? it.qty : '—'], ['Shipping and fees', money2(it.ship)]],
+    powder: [['Price (before tax)', money2(it.price)], ['Package size', hasNum(it.pkg) ? it.pkg + ' ' + (it.unit === 'kg' ? 'kg' : 'lb') : '—'], ['Shipping and fees', money2(it.ship)]],
+    primer: [['Type', it.type || '—'], ['Price (before tax)', money2(it.price)], ['Quantity in the box', hasNum(it.qty) ? it.qty : '—'], ['Shipping and fees', money2(it.ship)]],
+    case: [['Calibers', (it.caliberIds || []).map((c) => calName(c)).filter(Boolean).join(', ') || '—'], ['Price (before tax)', money2(it.price)], ['Quantity', hasNum(it.qty) ? it.qty : '—'], ['Loads per case', hasNum(it.loads) ? it.loads : '10 (default)'], ['Shipping and fees', money2(it.ship)]]
+  }[kind];
+  main(`<div class="row sb"><span class="muted">${INV[kind].one}</span>${it.archived ? '<span class="tag">Archived</span>' : ''}</div>
+    <details class="sec" open><summary>Specs and cost</summary>
+      <div class="card">${rows.map(([l, v]) => `<div class="kv"><span>${esc(l)}</span><b>${esc(v)}</b></div>`).join('')}
+        <div class="muted">${esc(costLive(st, it))}</div></div>
+      <button class="btn" data-act="lib-edit" data-s="${st}" data-id="${id}">Edit specs and cost</button></details>
+    <details class="sec" open><summary>Stock</summary>
+      <div class="card ${n < 0 ? 'flag' : lw ? 'excl' : ''}"><div class="lbl">On hand</div><div class="mono" style="font-size:30px;font-weight:600;${n < 0 ? 'color:var(--red)' : ''}">${qtyText(kind, it, n)}</div>
+        ${n < 0 ? '<div style="color:var(--red);font-weight:600">Below zero. Check your entries or recount.</div>' : ''}${lw ? lw.map((l) => `<div class="warn">${esc(lowLineText(l))}</div>`).join('') : ''}<div class="muted">The sum of the events in History.</div></div>
+      <div class="grid2"><button class="btn pri" data-act="inv-add" data-k="${kind}" data-id="${id}" data-t="start">Starting count</button><button class="btn" data-act="inv-add" data-k="${kind}" data-id="${id}" data-t="purchase">Purchase</button>
+        <button class="btn" data-act="inv-add" data-k="${kind}" data-id="${id}" data-t="recount">Recount</button><button class="btn" data-act="inv-add" data-k="${kind}" data-id="${id}" data-t="used">Used (manual)</button></div></details>
+    <details class="sec" open><summary>History · ${evs.length} event${evs.length === 1 ? '' : 's'}</summary>
+      ${evs.length ? evs.map((e) => invEventCard(e, false)).join('') : '<div class="card muted">No events yet. Add a starting count to begin.</div>'}</details>
+    <details class="sec"><summary>Archive and delete</summary>
+      <div class="muted">${it.archived ? 'Archived: hidden from every pick-list, the low-stock flags and the pop-up. Its groups and history are untouched.' : 'Archiving hides it from every pick-list, the low-stock flags and the pop-up. Existing groups still show it, and its history is kept. You can restore it any time.'}</div>
+      <button class="btn" data-act="${it.archived ? 'cm-restore' : 'cm-archive'}" data-k="${kind}" data-id="${id}">${it.archived ? 'Restore from archive' : 'Archive this item'}</button>
+      <div class="muted">Delete only works for an item never used in a group, historical entry or batch, and with no events. Otherwise archive it.</div>
+      <button class="btn danger sm" data-act="lib-delete" data-k="${kind}" data-id="${id}">Delete this item</button></details>`);
+}
+const LIB_USE = { bullets: 'bulletId', powders: 'powderId', primers: 'primerId', cases: 'caseId' };
+function libBlock(s, x) { // why a bullet / powder / primer / case cannot be deleted; '' = free to delete
+  const f = LIB_USE[s], cnt = (list) => list.filter((r) => r[f] === x.id).length;
+  const nG = cnt(S.groups), nH = cnt(S.hist), nB = cnt(S.batches), nE = S.ledger.filter((e) => e.itemId === x.id).length, parts = [];
+  if (nG) parts.push(`${nG} group${nG === 1 ? '' : 's'}`);
+  if (nH) parts.push(`${nH} historical entr${nH === 1 ? 'y' : 'ies'}`);
+  if (nB) parts.push(`${nB} batch${nB === 1 ? '' : 'es'}`);
+  if (nE) parts.push(`${nE} inventory event${nE === 1 ? '' : 's'}`);
+  return parts.length ? `Used or has history (${parts.join(', ')}). Archive it instead.` : '';
+}
+async function libDelete(kind, id) {
+  const st = INV[kind].store, x = byId(st, id); if (!x) return;
+  const why = libBlock(st, x);
+  if (why) return toast(why);
+  if (!confirm(`Delete "${x.name}"? This cannot be undone.`)) return;
+  await del(st, id); toast('Deleted'); navTo('#/components', true);
+}
+async function cmArchive(kind, id, on) {
+  const st = INV[kind].store, x = byId(st, id); if (!x) return;
+  if (on && !confirm(`Archive "${x.name}"? It leaves every pick-list and the low-stock flags. Existing groups and its history stay. You can restore it.`)) return;
+  await put(st, { ...x, archived: on }); toast(on ? 'Archived' : 'Restored'); render();
 }
 function invEventDialog(kind, id, type) {
   const it = byId(INV[kind].store, id), isP = kind === 'powder';
@@ -981,17 +1060,17 @@ function viewBatch() {
   bar(back('#/components', 'Components', true), 'Log loaded batch');
   if (!IB.date) IB.date = today();
   if (IB.rid && !byId('rifles', IB.rid)) IB.rid = '';
-  const caseList = IB.rid && !IB.all ? casesFor(IB.rid, IB.case) : S.cases;
+  const caseList = IB.rid && !IB.all ? casesFor(IB.rid, IB.case) : act(S.cases, IB.case);
   const loads = IB.rid ? loggedLoads(IB.rid) : [];
   const sel = (kind, label, list) => `<div class="f"><label class="lbl" for="ib-${kind}">${label}</label><select class="in" id="ib-${kind}">${opts(list, IB[kind], (x) => x.name + (kind === 'bullet' && fin(x.weight) ? ' ' + x.weight + ' gn' : ''), '— none —')}</select></div>`;
   main(`<h1>Log loaded batch</h1>
     <div class="muted">Records the components you used up loading a batch of rounds. It never changes group shot counts or fouling shots.</div>
     <div class="f"><label class="lbl" for="ib-rid">Firearm · optional</label><select class="in" id="ib-rid">${opts(S.rifles, IB.rid, (x) => x.name, 'No firearm')}</select></div>
     ${IB.rid && loads.length ? `<div class="f"><label class="lbl" for="ib-load">Logged load</label><select class="in" id="ib-load"><option value="">— pick a load —</option>${loads.map(([k, g]) => `<option value="${esc(k)}"${IB.load === k ? ' selected' : ''}>${esc(bl(g.bulletId))} · ${esc(nm('powders', g.powderId))} ${g.charge} gn · ${esc(nm('primers', g.primerId))}</option>`).join('')}</select><div class="muted">Fills the parts below. Change any of them by hand.</div></div>` : ''}
-    ${sel('bullet', 'Bullet', S.bullets)}${sel('powder', 'Powder', S.powders)}
+    ${sel('bullet', 'Bullet', act(S.bullets, IB.bullet))}${sel('powder', 'Powder', act(S.powders, IB.powder))}
     <div class="f"><label class="lbl" for="ib-charge">Charge (gn)</label><input class="in m" id="ib-charge" inputmode="decimal" value="${esc(IB.charge)}"></div>
-    ${sel('primer', 'Primer', S.primers)}
-    <div class="f"><label class="lbl" for="ib-case">Case</label><select class="in" id="ib-case">${opts(caseList, IB.case, (x) => x.name, '— none —')}</select>${IB.rid && (caseList.length < S.cases.length || IB.all) ? `<div class="muted"><label style="text-decoration:underline"><input type="checkbox" id="ib-allcase"${IB.all ? ' checked' : ''}> show all cases</label></div>` : ''}</div>
+    ${sel('primer', 'Primer', act(S.primers, IB.primer))}
+    <div class="f"><label class="lbl" for="ib-case">Case</label><select class="in" id="ib-case">${opts(caseList, IB.case, (x) => x.name, '— none —')}</select>${IB.rid && (caseList.length < act(S.cases, IB.case).length || IB.all) ? `<div class="muted"><label style="text-decoration:underline"><input type="checkbox" id="ib-allcase"${IB.all ? ' checked' : ''}> show all cases</label></div>` : ''}</div>
     <div class="grid2"><div class="f"><label class="lbl" for="ib-rounds">Rounds loaded</label><input class="in m" id="ib-rounds" inputmode="numeric" value="${esc(IB.rounds)}"></div>
       <div class="f"><label class="lbl" for="ib-date">Date</label><input class="in m" id="ib-date" value="${esc(IB.date)}"></div></div>
     <label class="row" style="min-height:44px;font-weight:600"><input type="checkbox" id="ib-deduct" style="width:24px;height:24px"${IB.deduct ? ' checked' : ''}> Deduct unused cases</label>
@@ -1139,18 +1218,18 @@ function ccManualHtml(kind) {
 function viewCostCalc() {
   bar(back('#/tools', 'Tools', true), 'Load cost');
   if (CC.rid && !byId('rifles', CC.rid)) CC.rid = '';
-  const caseList = CC.rid && !CC.all ? casesFor(CC.rid, CC.case) : S.cases;
+  const caseList = CC.rid && !CC.all ? casesFor(CC.rid, CC.case) : act(S.cases, CC.case);
   const sel = (kind, label, list, extra = '') => `<div class="f"><label class="lbl" for="cc-${kind}">${label}</label><select class="in" id="cc-${kind}">${opts(list, CC[kind], (x) => x.name + (kind === 'bullet' && fin(x.weight) ? ' ' + x.weight + ' gn' : ''), '— pick —')}<option value="${MAN}"${CC[kind] === MAN ? ' selected' : ''}>Manual…</option></select>${extra}</div>${CC[kind] === MAN ? ccManualHtml(kind) : ''}`;
   const loads = CC.rid ? (() => { const m = new Map(); for (const g of S.groups.filter((x) => x.rifleId === CC.rid).sort((a, b) => b.ts - a.ts)) { const k = [g.bulletId, g.powderId, Number(g.charge), g.primerId].join('|'); if (!m.has(k)) m.set(k, g); } return [...m.entries()]; })() : [];
   main(`<h1>Load cost</h1>
     <div class="muted">Cost per round from your library prices (before tax, plus tax). One bullet, one primer and one case per round. Display only: nothing here affects your data or rankings.</div>
     <div class="f"><label class="lbl" for="cc-rid">Firearm · optional (filters the case list, enables the shortcut)</label><select class="in" id="cc-rid">${opts(S.rifles, CC.rid, (x) => x.name, 'No firearm')}</select></div>
     ${CC.rid && loads.length ? `<div class="f"><label class="lbl" for="cc-fill">Fill from a logged load</label><select class="in" id="cc-fill"><option value="">— pick a load —</option>${loads.map(([k, g]) => `<option value="${esc(k)}">${esc(bl(g.bulletId))} · ${esc(nm('powders', g.powderId))} ${g.charge} gn · ${esc(nm('primers', g.primerId))}</option>`).join('')}</select></div>` : ''}
-    ${sel('bullet', 'Bullet', S.bullets)}
-    ${sel('powder', 'Powder', S.powders)}
+    ${sel('bullet', 'Bullet', act(S.bullets, CC.bullet))}
+    ${sel('powder', 'Powder', act(S.powders, CC.powder))}
     <div class="f"><label class="lbl" for="cc-charge">Charge (gn)</label><input class="in m" id="cc-charge" inputmode="decimal" value="${esc(CC.charge)}"></div>
-    ${sel('primer', 'Primer', S.primers)}
-    ${sel('case', 'Case', caseList, CC.rid && caseList.length < S.cases.length ? '<div class="muted"><label style="text-decoration:underline"><input type="checkbox" id="cc-allcase"> show all cases</label></div>' : (CC.rid && CC.all ? '<div class="muted"><label style="text-decoration:underline"><input type="checkbox" id="cc-allcase" checked> show all cases</label></div>' : ''))}
+    ${sel('primer', 'Primer', act(S.primers, CC.primer))}
+    ${sel('case', 'Case', caseList, CC.rid && caseList.length < act(S.cases, CC.case).length ? '<div class="muted"><label style="text-decoration:underline"><input type="checkbox" id="cc-allcase"> show all cases</label></div>' : (CC.rid && CC.all ? '<div class="muted"><label style="text-decoration:underline"><input type="checkbox" id="cc-allcase" checked> show all cases</label></div>' : ''))}
     <div id="cc-out">${ccResult()}</div>`);
 }
 function ccSave(kind) { // turn a manual entry into a library item (needs a name; a bullet also needs a diameter)
@@ -1268,15 +1347,16 @@ const calOpts = () => [['', '— none —'], ...S.calibers.slice().sort((a, b) =
 // bullets of the rifle's caliber, plus any bullet with no caliber set (never hide a bullet just because it is unassigned)
 function bulletsFor(rid, keepId) {
   const r = byId('rifles', rid);
-  if (!r || !r.caliberId) return S.bullets;
-  return S.bullets.filter((b) => !b.caliberId || b.caliberId === r.caliberId || b.id === keepId);
+  const all = act(S.bullets, keepId);
+  if (!r || !r.caliberId) return all;
+  return all.filter((b) => !b.caliberId || b.caliberId === r.caliberId || b.id === keepId);
 }
 
 function histForm(rid, h) {
-  if (!S.bullets.length || !S.powders.length) { toast('Add a bullet and powder in Settings first'); return; }
+  if (!act(S.bullets).length || !act(S.powders).length) { toast('Add a bullet and powder in Components first'); return; }
   formDialog(h ? 'Edit historical entry' : 'Historical entry', [
     { k: 'bulletId', label: 'Bullet', type: 'select', opts: bulletsFor(rid, h && h.bulletId).map((b) => [b.id, bl(b.id)]) },
-    { k: 'powderId', label: 'Powder', type: 'select', opts: S.powders.map((p) => [p.id, p.name]) },
+    { k: 'powderId', label: 'Powder', type: 'select', opts: act(S.powders, h && h.powderId).map((p) => [p.id, p.name]) },
     { k: 'charge', label: 'Charge (gn)', type: 'num', req: true },
     { k: 'es', label: 'Extreme spread, manual (in)', type: 'num' },
     { k: 'note', label: 'Note' }
@@ -1388,26 +1468,27 @@ function shotRow(i, p = {}) {
 // No firearm caliber = every case. The group's own current case (keepId) is always kept in the list.
 function casesFor(rid, keepId) {
   const r = byId('rifles', rid);
-  if (!r || !r.caliberId) return S.cases;
-  return S.cases.filter((c) => !(c.caliberIds && c.caliberIds.length) || c.caliberIds.includes(r.caliberId) || c.id === keepId);
+  const all = act(S.cases, keepId);
+  if (!r || !r.caliberId) return all;
+  return all.filter((c) => !(c.caliberIds && c.caliberIds.length) || c.caliberIds.includes(r.caliberId) || c.id === keepId);
 }
 const lastCase = (rid) => {
-  const g = S.groups.filter((x) => x.rifleId === rid && x.caseId && byId('cases', x.caseId)).sort((a, b) => b.ts - a.ts)[0];
+  const g = S.groups.filter((x) => x.rifleId === rid && x.caseId && byId('cases', x.caseId) && !byId('cases', x.caseId).archived).sort((a, b) => b.ts - a.ts)[0];
   return g ? g.caseId : '';
 };
 const caseLine = (g) => (g.caseId && byId('cases', g.caseId) ? `<div class="muted">Case: ${esc(nm('cases', g.caseId))}</div>` : '');
 // bulk fill: only groups whose case is blank, never overwriting one; asks first and offers a backup
 function setCaseBulk(rid) {
-  if (!S.cases.length) return toast('Add a case in Settings first');
+  if (!act(S.cases).length) return toast('Add a case in Components first');
   const blanks = () => S.groups.filter((g) => g.rifleId === rid && !g.caseId);
   if (!blanks().length) return toast('Every group on this firearm already has a case');
   const old = !S.cfg.lastBackup || Date.now() - S.cfg.lastBackup > 864e5;
   const filtered = casesFor(rid); // same caliber filter as the group form; if it leaves nothing, show every case
-  const start = filtered.length ? filtered : S.cases;
+  const start = filtered.length ? filtered : act(S.cases);
   const d = document.createElement('dialog');
   d.innerHTML = `<form method="dialog" style="display:flex;flex-direction:column;gap:12px"><h1 style="font-size:22px">Set case for groups without one</h1>
     <div class="f"><label class="lbl" for="sc-case">Case</label><select class="in" id="sc-case">${opts(start, start[0].id, (x) => x.name)}</select>
-    ${filtered.length && filtered.length < S.cases.length ? '<div class="muted"><label style="text-decoration:underline"><input type="checkbox" id="sc-all"> show all cases</label></div>' : ''}</div>
+    ${filtered.length && filtered.length < act(S.cases).length ? '<div class="muted"><label style="text-decoration:underline"><input type="checkbox" id="sc-all"> show all cases</label></div>' : ''}</div>
     <div class="card"><b id="sc-msg"></b><div class="muted">Groups that already have a case are not changed.</div>
     <div class="muted">${S.cfg.lastBackup ? 'Last backup: ' + new Date(S.cfg.lastBackup).toLocaleString() : 'You have not made a backup yet.'}</div></div>
     <button class="btn ${old ? 'pri' : ''}" type="button" id="sc-backup">Back up first, then set</button>
@@ -1422,7 +1503,7 @@ function setCaseBulk(rid) {
     close(); toast(`Case set on ${n} group${n === 1 ? '' : 's'}`); render();
   };
   $('#sc-case', d).onchange = msg; msg();
-  if ($('#sc-all', d)) $('#sc-all', d).onchange = (e) => { $('#sc-case', d).innerHTML = opts(e.target.checked ? S.cases : filtered, (e.target.checked ? S.cases : filtered)[0].id, (x) => x.name); msg(); };
+  if ($('#sc-all', d)) $('#sc-all', d).onchange = (e) => { const lst = e.target.checked ? act(S.cases) : filtered; $('#sc-case', d).innerHTML = opts(lst, lst[0].id, (x) => x.name); msg(); };
   $('#sc-x', d).onclick = close;
   $('#sc-go', d).onclick = apply;
   $('#sc-backup', d).onclick = async () => { await exportData(); await apply(); };
@@ -1471,32 +1552,32 @@ function viewGroupFormPistol(rid, gid, fromId, sid) {
   const r = byId('rifles', rid);
   const g0 = gid ? byId('groups', gid) : null;
   const src = g0 || (fromId && byId('groups', fromId)) || S.groups.filter((g) => g.rifleId === rid).sort((a, b) => b.ts - a.ts)[0] || {};
-  const missing = !S.bullets.length || !S.powders.length || !S.primers.length;
+  const missing = !act(S.bullets).length || !act(S.powders).length || !act(S.primers).length;
   bar(back(g0 ? '#/group/' + gid : '#/session/' + sid, g0 ? 'Group' : 'Session'), g0 ? 'Edit Group' : 'New Group', '', rid);
   const curSid = g0 ? g0.sessionId : sid;
   const sessOpts = sessionsOf(rid).sort((a, b) => b.date.localeCompare(a.date) || b.ts - a.ts)
     .map((x) => `<option value="${x.id}"${x.id === curSid ? ' selected' : ''}>${esc(sessionLabel(x))} · ${fin(x.fouling) ? x.fouling : 0} fouling</option>`).join('');
   const bLabel = (x) => x.name + (fin(x.weight) ? ' ' + x.weight + ' gn' : '');
-  const filtered = bulletsFor(rid, src.bulletId);
+  const filtered = bulletsFor(rid, g0 && src.bulletId);
   const caseSel = g0 ? (g0.caseId || '') : (casesFor(rid).some((c) => c.id === lastCase(rid)) ? lastCase(rid) : ''); // new group: the case last used on this firearm, only if it passes the caliber filter
   const n0 = g0 ? g0.shots.length : (src.shots && src.shots.length ? src.shots.length : 10);
   const vals = Array.from({ length: Math.max(n0, 30) }, (_, i) => (g0 && g0.shots[i] && fin(g0.shots[i].v) ? String(g0.shots[i].v) : ''));
   const sec = (t) => `<h2 style="color:var(--accent-text);border-color:var(--accent-text)">${t}</h2>`;
   const fld = (id, label, val, cls = 'm', extra = '') => `<div class="f"><label class="lbl" for="${id}">${label}</label><input class="in ${cls}" id="${id}" type="text" ${cls === 'm' ? 'inputmode="decimal"' : ''} value="${esc(val ?? '')}" autocomplete="off" ${extra}></div>`;
   const yn = (name, on) => `<div class="seg"><label><input type="radio" name="${name}" value="1"${on ? ' checked' : ''}><span>Y</span></label><label><input type="radio" name="${name}" value="0"${on ? '' : ' checked'}><span>N</span></label></div>`;
-  main(`${missing ? '<div class="card warn">Add at least one Bullet, Powder and Primer in <a href="#/settings" style="text-decoration:underline">Settings</a> first.</div>' : ''}
+  main(`${missing ? '<div class="card warn">Add at least one Bullet, Powder and Primer in <a href="#/components" style="text-decoration:underline">Components</a> first.</div>' : ''}
     <form id="gform" data-pistol="1" autocomplete="off">
     ${sec('SESSION')}
     <div class="f"><label class="lbl" for="f-session">Session</label><select class="in" id="f-session">${sessOpts}</select></div>
     <div class="muted">Date, wind, temp and fouling shots belong to the session. Change them with Edit session on the firearm or group page.</div>
     ${sec('LOAD')}
     <div class="f"><label class="lbl" for="f-bullet">Bullet</label><select class="in" id="f-bullet">${opts(filtered, src.bulletId, bLabel)}</select>
-    ${r.caliberId ? `<div class="muted">Showing ${esc(calName(r.caliberId))} bullets (and any with no caliber set).${filtered.length < S.bullets.length ? ' <label style="text-decoration:underline"><input type="checkbox" id="f-allcal"> show all bullets</label>' : ''}</div>`
+    ${r.caliberId ? `<div class="muted">Showing ${esc(calName(r.caliberId))} bullets (and any with no caliber set).${filtered.length < act(S.bullets, g0 && src.bulletId).length ? ' <label style="text-decoration:underline"><input type="checkbox" id="f-allcal"> show all bullets</label>' : ''}</div>`
       : '<div class="muted">Set this firearm\'s caliber (firearm → Edit) to filter bullets automatically.</div>'}</div>
-    <div class="f"><label class="lbl" for="f-powder">Powder</label><select class="in" id="f-powder">${opts(S.powders, src.powderId, (x) => x.name)}</select></div>
+    <div class="f"><label class="lbl" for="f-powder">Powder</label><select class="in" id="f-powder">${opts(act(S.powders, g0 && src.powderId), src.powderId, (x) => x.name)}</select></div>
     <div class="grid2">${fld('f-charge', 'Charge (gn)', src.charge)}${fld('f-coal', 'COAL (in)', src.coal)}</div>
-    <div class="f"><label class="lbl" for="f-primer">Primer</label><select class="in" id="f-primer">${opts(S.primers, src.primerId, (x) => x.name)}</select></div>
-    <div class="f"><label class="lbl" for="f-case">Case · optional</label><select class="in" id="f-case">${opts(casesFor(rid, caseSel), caseSel, (x) => x.name, '— none —')}</select>${casesFor(rid, caseSel).length < S.cases.length ? '<div class="muted"><label style="text-decoration:underline"><input type="checkbox" id="f-allcase"> show all cases</label></div>' : ''}</div>
+    <div class="f"><label class="lbl" for="f-primer">Primer</label><select class="in" id="f-primer">${opts(act(S.primers, g0 && src.primerId), src.primerId, (x) => x.name)}</select></div>
+    <div class="f"><label class="lbl" for="f-case">Case · optional</label><select class="in" id="f-case">${opts(casesFor(rid, caseSel), caseSel, (x) => x.name, '— none —')}</select>${casesFor(rid, caseSel).length < act(S.cases, caseSel).length ? '<div class="muted"><label style="text-decoration:underline"><input type="checkbox" id="f-allcase"> show all cases</label></div>' : ''}</div>
     ${fld('f-dist', 'Distance (yards)', fin(src.distance) ? src.distance : 25)}
     ${sec('GROUP')}
     ${fld('f-size', 'Group size (manual, outside-to-outside)', g0 && fin(g0.groupSize) ? g0.groupSize : '')}
@@ -1533,11 +1614,11 @@ function viewGroupFormPistol(rid, gid, fromId, sid) {
   form.addEventListener('change', (e) => {
     if (e.target.id === 'f-allcal') {
       const cur = $('#f-bullet').value;
-      $('#f-bullet').innerHTML = opts(e.target.checked ? S.bullets : bulletsFor(rid, cur), cur, bLabel);
+      $('#f-bullet').innerHTML = opts(e.target.checked ? act(S.bullets, cur) : bulletsFor(rid, cur), cur, bLabel);
     }
     if (e.target.id === 'f-allcase') { // temporarily show every case, keeping the current pick
       const cur = $('#f-case').value;
-      $('#f-case').innerHTML = opts(e.target.checked ? S.cases : casesFor(rid, cur), cur, (x) => x.name, '— none —');
+      $('#f-case').innerHTML = opts(e.target.checked ? act(S.cases, cur) : casesFor(rid, cur), cur, (x) => x.name, '— none —');
     }
     issueSync();
     pv();
@@ -1576,32 +1657,32 @@ function viewGroupForm(rid, gid, fromId, sid) {
   if (isPistol(rid)) return viewGroupFormPistol(rid, gid, fromId, sid);
   const g0 = gid ? byId('groups', gid) : null;
   const src = g0 || (fromId && byId('groups', fromId)) || S.groups.filter((g) => g.rifleId === rid).sort((a, b) => b.ts - a.ts)[0] || {};
-  const missing = !S.bullets.length || !S.powders.length || !S.primers.length;
+  const missing = !act(S.bullets).length || !act(S.powders).length || !act(S.primers).length;
   bar(back(g0 ? '#/group/' + gid : '#/session/' + sid, g0 ? 'Group' : 'Session'), g0 ? 'Edit Group' : 'New Group', '', rid);
   const curSid = g0 ? g0.sessionId : sid;
   const sessOpts = sessionsOf(rid).sort((a, b) => b.date.localeCompare(a.date) || b.ts - a.ts)
     .map((x) => `<option value="${x.id}"${x.id === curSid ? ' selected' : ''}>${esc(sessionLabel(x))} · ${fin(x.fouling) ? x.fouling : 0} fouling</option>`).join('');
   const bLabel = (x) => x.name + (fin(x.weight) ? ' ' + x.weight + ' gn' : '');
-  const filtered = bulletsFor(rid, src.bulletId);
+  const filtered = bulletsFor(rid, g0 && src.bulletId);
   const caseSel = g0 ? (g0.caseId || '') : (casesFor(rid).some((c) => c.id === lastCase(rid)) ? lastCase(rid) : ''); // new group: the case last used on this firearm, only if it passes the caliber filter
   const nShots = g0 ? g0.shots.length : 5;
   const sec = (t) => `<h2 style="color:var(--accent-text);border-color:var(--accent-text)">${t}</h2>`;
   const fld = (id, label, val, cls = 'm', extra = '') => `<div class="f"><label class="lbl" for="${id}">${label}</label><input class="in ${cls}" id="${id}" type="text" ${cls === 'm' ? 'inputmode="decimal"' : ''} value="${esc(val ?? '')}" autocomplete="off" ${extra}></div>`;
   const yn = (name, on) => `<div class="seg"><label><input type="radio" name="${name}" value="1"${on ? ' checked' : ''}><span>Y</span></label><label><input type="radio" name="${name}" value="0"${on ? '' : ' checked'}><span>N</span></label></div>`;
-  main(`${missing ? '<div class="card warn">Add at least one Bullet, Powder and Primer in <a href="#/settings" style="text-decoration:underline">Settings</a> first.</div>' : ''}
+  main(`${missing ? '<div class="card warn">Add at least one Bullet, Powder and Primer in <a href="#/components" style="text-decoration:underline">Components</a> first.</div>' : ''}
     <form id="gform" autocomplete="off">
     ${sec('SESSION')}
     <div class="f"><label class="lbl" for="f-session">Session</label><select class="in" id="f-session">${sessOpts}</select></div>
     <div class="muted">Date, wind, temp and fouling shots belong to the session. Change them with Edit session on the firearm or group page.</div>
     ${sec('LOAD')}
     <div class="f"><label class="lbl" for="f-bullet">Bullet</label><select class="in" id="f-bullet">${opts(filtered, src.bulletId, bLabel)}</select>
-    ${r.caliberId ? `<div class="muted">Showing ${esc(calName(r.caliberId))} bullets (and any with no caliber set).${filtered.length < S.bullets.length ? ' <label style="text-decoration:underline"><input type="checkbox" id="f-allcal"> show all bullets</label>' : ''}</div>`
+    ${r.caliberId ? `<div class="muted">Showing ${esc(calName(r.caliberId))} bullets (and any with no caliber set).${filtered.length < act(S.bullets, g0 && src.bulletId).length ? ' <label style="text-decoration:underline"><input type="checkbox" id="f-allcal"> show all bullets</label>' : ''}</div>`
       : '<div class="muted">Set this firearm\'s caliber (firearm → Edit) to filter bullets automatically.</div>'}</div>
-    <div class="f"><label class="lbl" for="f-powder">Powder</label><select class="in" id="f-powder">${opts(S.powders, src.powderId, (x) => x.name)}</select></div>
+    <div class="f"><label class="lbl" for="f-powder">Powder</label><select class="in" id="f-powder">${opts(act(S.powders, g0 && src.powderId), src.powderId, (x) => x.name)}</select></div>
     <div class="grid2">${fld('f-charge', 'Charge (gn)', src.charge)}${fld('f-jump', 'Jump (thou off lands)', src.jump)}</div>
     ${fld('f-dist', 'Distance (yards)', fin(src.distance) ? src.distance : 100)}
-    <div class="f"><label class="lbl" for="f-primer">Primer</label><select class="in" id="f-primer">${opts(S.primers, src.primerId, (x) => x.name)}</select></div>
-    <div class="f"><label class="lbl" for="f-case">Case · optional</label><select class="in" id="f-case">${opts(casesFor(rid, caseSel), caseSel, (x) => x.name, '— none —')}</select>${casesFor(rid, caseSel).length < S.cases.length ? '<div class="muted"><label style="text-decoration:underline"><input type="checkbox" id="f-allcase"> show all cases</label></div>' : ''}</div>
+    <div class="f"><label class="lbl" for="f-primer">Primer</label><select class="in" id="f-primer">${opts(act(S.primers, g0 && src.primerId), src.primerId, (x) => x.name)}</select></div>
+    <div class="f"><label class="lbl" for="f-case">Case · optional</label><select class="in" id="f-case">${opts(casesFor(rid, caseSel), caseSel, (x) => x.name, '— none —')}</select>${casesFor(rid, caseSel).length < act(S.cases, caseSel).length ? '<div class="muted"><label style="text-decoration:underline"><input type="checkbox" id="f-allcase"> show all cases</label></div>' : ''}</div>
     <div class="grid2">${fld('f-coal', 'COAL (in) · optional', src.coal)}${fld('f-trim', 'Trimmed case (in) · opt.', src.trim)}</div>
     ${sec('FLAGS')}
     <div class="grid2"><div class="f"><span class="lbl">Include in analysis</span>${yn('inc', g0 ? g0.include !== false : true)}</div>
@@ -1621,11 +1702,11 @@ function viewGroupForm(rid, gid, fromId, sid) {
   form.addEventListener('change', (e) => {
     if (e.target.id === 'f-allcal') { // temporarily show bullets of every caliber, keeping the current pick
       const cur = $('#f-bullet').value;
-      $('#f-bullet').innerHTML = opts(e.target.checked ? S.bullets : bulletsFor(rid, cur), cur, bLabel);
+      $('#f-bullet').innerHTML = opts(e.target.checked ? act(S.bullets, cur) : bulletsFor(rid, cur), cur, bLabel);
     }
     if (e.target.id === 'f-allcase') { // temporarily show every case, keeping the current pick
       const cur = $('#f-case').value;
-      $('#f-case').innerHTML = opts(e.target.checked ? S.cases : casesFor(rid, cur), cur, (x) => x.name, '— none —');
+      $('#f-case').innerHTML = opts(e.target.checked ? act(S.cases, cur) : casesFor(rid, cur), cur, (x) => x.name, '— none —');
     }
     issueSync();
     preview();
@@ -1710,14 +1791,11 @@ function viewSettings() {
   bar(back('#/', 'Firearms', true), 'Settings');
   const lib = (title, s, sub) => `<h2 class="row sb" style="align-items:center">${title}<button class="btn sm" data-act="lib-new" data-s="${s}">+ Add</button></h2>
     ${S[s].slice().sort((a, b) => a.name.localeCompare(b.name)).map((x) => `<div class="item" role="button" tabindex="0" data-act="lib-edit" data-s="${s}" data-id="${x.id}"><div>${esc(x.name)}${sub(x) ? `<small>${esc(sub(x))}</small>` : ''}</div><span class="muted">Edit</span></div>`).join('') || '<div class="muted">None yet.</div>'}`;
-  main(`<h1>Components</h1>
+  main(`<h1>Settings</h1>
     ${lib('CALIBERS', 'calibers', () => '')}
     <div class="muted" style="margin-top:-4px">Add a caliber once (e.g. ".308 Win"), then pick it on each firearm and each bullet. A firearm only offers bullets of its own caliber.</div>
     ${lib('FIREARMS', 'rifles', (x) => `${calName(x.caliberId) || 'no caliber'}${x.barrel ? ' · ' + x.barrel + ' in' : ''} · start ${x.startRounds || 0} rds`).replace('data-act="lib-new" data-s="rifles"', 'data-act="new-rifle"')}
-    ${lib('BULLETS', 'bullets', (x) => [calName(x.caliberId), x.style, fin(x.weight) ? x.weight + ' gn' : '', fin(x.diameter) ? 'dia ' + x.diameter + ' in' : ''].filter(Boolean).join(' · '))}
-    ${lib('POWDERS', 'powders', () => '')}
-    ${lib('PRIMERS', 'primers', (x) => x.type || '')}
-    ${lib('CASES · optional', 'cases', (x) => (x.caliberIds || []).map((id) => calName(id)).filter(Boolean).join(', '))}
+    <div class="muted">Bullets, powders, primers and cases are on the <a href="#/components" style="text-decoration:underline">Components</a> page.</div>
     <h2>APPEARANCE</h2>
     <div class="grid3">${[['light', 'Light'], ['dark', 'Dark'], ['auto', 'Auto']].map(([v, l]) => `<button class="btn ${themePref() === v ? 'pri' : ''}" data-act="theme" data-v="${v}" aria-pressed="${themePref() === v}">${l}</button>`).join('')}</div>
     <div class="lbl">Accent color</div>
@@ -1726,7 +1804,7 @@ function viewSettings() {
     <h2>COST</h2>
     <div class="grid2"><div class="f"><label class="lbl" for="cost-tax">Tax rate (%)</label><input class="in m" id="cost-tax" inputmode="decimal" value="${taxPct()}"></div>
     <div class="f"><label class="lbl" for="cost-cur">Currency label</label><input class="in" id="cost-cur" value="${esc(curLabel())}" maxlength="6"></div></div>
-    <div class="muted">Applies to every price you enter in the libraries (prices are before tax). The label is display only. Changing a price or the tax rate changes every load's cost everywhere, and no price history is kept.</div>
+    <div class="muted">Applies to every price you enter on the Components page (prices are before tax). The label is display only. Changing a price or the tax rate changes every load's cost everywhere, and no price history is kept.</div>
     <h2>INVENTORY</h2>
     <div class="f"><label class="lbl" for="inv-low">Warn below this many rounds of a firearm's best load</label><input class="in m" id="inv-low" inputmode="numeric" value="${lowLimit()}"></div>
     <div class="muted">A bullet, primer or powder that can no longer make this many rounds of a firearm's Current Best Load shows yellow on Components and on that firearm's page. 0 turns it off. Brass is never checked, and a firearm with no best load yet is skipped.</div>
@@ -1776,19 +1854,16 @@ const LIBS = {
   cases: [{ k: 'name', label: 'Manufacturer / name', req: true }, { k: 'caliberIds', label: 'Calibers (optional, pick any)', type: 'multi', opts: [], empty: 'Add calibers in Settings to tag cases.' },
     { k: 'price', label: 'Price ($, before tax) · optional (0 = free brass)', type: 'num' }, { k: 'qty', label: 'Quantity', type: 'num' }, { k: 'loads', label: 'Expected loads per case (blank = 10)', type: 'num' }, { k: 'ship', label: 'Shipping and fees for this purchase ($)', type: 'num' }]
 };
-const USE = { bullets: 'bulletId', powders: 'powderId', primers: 'primerId', cases: 'caseId' };
-function libForm(s, x) {
-  formDialog(x ? 'Edit' : 'Add', LIBS[s].map((f) => (f.k === 'caliberId' ? { ...f, opts: calOpts() } : f.k === 'caliberIds' ? { ...f, opts: calOpts().filter((o) => o[0]) } : f)), x || (s === 'bullets' ? { diameter: 0.308 } : s === 'cases' ? { loads: 10 } : {}), async (v) => { await put(s, { ...(x || { id: uid() }), ...v }); },
-    x ? async () => {
-      if (USE[s] && S.groups.some((g) => g[USE[s]] === x.id)) { toast('In use by logged groups — cannot delete'); return false; }
-      if (s === 'calibers') { // blocked while anything uses it; the message says what
-        const nF = S.rifles.filter((r) => r.caliberId === x.id).length, nB = S.bullets.filter((b) => b.caliberId === x.id).length, nC = S.cases.filter((c) => (c.caliberIds || []).includes(x.id)).length;
-        if (nF || nB || nC) {
-          toast('In use by ' + [nF && `${nF} firearm${nF === 1 ? '' : 's'}`, nB && `${nB} bullet${nB === 1 ? '' : 's'}`, nC && `${nC} case${nC === 1 ? '' : 's'}`].filter(Boolean).join(', ') + ' — remove it there first');
-          return false;
-        }
+const LIB_ONE = { calibers: 'caliber', bullets: 'bullet', powders: 'powder', primers: 'primer', cases: 'case' };
+function libForm(s, x) { // deleting bullets, powders, primers and cases happens on the item's page (libDelete); only calibers delete from here
+  formDialog((x ? 'Edit ' : 'Add ') + LIB_ONE[s], LIBS[s].map((f) => (f.k === 'caliberId' ? { ...f, opts: calOpts() } : f.k === 'caliberIds' ? { ...f, opts: calOpts().filter((o) => o[0]) } : f)), x || (s === 'bullets' ? { diameter: 0.308 } : s === 'cases' ? { loads: 10 } : {}), async (v) => { await put(s, { ...(x || { id: uid() }), ...v }); },
+    x && s === 'calibers' ? async () => {
+      // blocked while anything uses it; the message says what
+      const nF = S.rifles.filter((r) => r.caliberId === x.id).length, nB = S.bullets.filter((b) => b.caliberId === x.id).length, nC = S.cases.filter((c) => (c.caliberIds || []).includes(x.id)).length;
+      if (nF || nB || nC) {
+        toast('In use by ' + [nF && `${nF} firearm${nF === 1 ? '' : 's'}`, nB && `${nB} bullet${nB === 1 ? '' : 's'}`, nC && `${nC} case${nC === 1 ? '' : 's'}`].filter(Boolean).join(', ') + ' — remove it there first');
+        return false;
       }
-      if (['bullets', 'powders', 'primers', 'cases'].includes(s) && S.ledger.some((e) => e.itemId === x.id)) { toast('Has inventory history — delete its events first'); return false; }
       if (!confirm('Delete this item?')) return false;
       await del(s, x.id); return true;
     } : null, ['bullets', 'powders', 'primers', 'cases'].includes(s) ? (v) => costLive(s, v) : null);
@@ -1886,6 +1961,10 @@ document.addEventListener('click', (e) => {
   else if (a === 'inv-del-event') invDelEvent(id);
   else if (a === 'inv-del-batch') invDelBatch(id);
   else if (a === 'inv-consolidate') invConsolidate();
+  else if (a === 'cm-sec') { CM = { ...CM, sec: t.dataset.v, q: '', cal: '' }; viewAllKeepScroll(); }
+  else if (a === 'cm-archive') cmArchive(t.dataset.k, id, true);
+  else if (a === 'cm-restore') cmArchive(t.dataset.k, id, false);
+  else if (a === 'lib-delete') libDelete(t.dataset.k, id);
   else if (a === 'ib-save') ibConfirm();
   else if (a === 'set-case') setCaseBulk(id);
   else if (a === 'menu') { const m = $('#menu'); m.hidden = !m.hidden; t.setAttribute('aria-expanded', String(!m.hidden)); }
@@ -1921,7 +2000,8 @@ document.addEventListener('input', (e) => {
     if (id === 'ib-rid') { IB.rid = v; IB.load = ''; IB.all = false; viewAllKeepScroll(); }
     else if (id === 'ib-load') {
       const g = v && S.groups.filter((x) => x.rifleId === IB.rid && [x.bulletId, x.powderId, Number(x.charge), x.primerId].join('|') === v).sort((a, b) => b.ts - a.ts)[0];
-      if (g) { IB.load = v; IB.bullet = g.bulletId; IB.powder = g.powderId; IB.primer = g.primerId; IB.charge = String(g.charge); IB.case = g.caseId && byId('cases', g.caseId) ? g.caseId : ''; viewAllKeepScroll(); }
+      const live = (s, id) => (id && byId(s, id) && !byId(s, id).archived ? id : ''); // an archived part is not filled in
+      if (g) { IB.load = v; IB.bullet = live('bullets', g.bulletId); IB.powder = live('powders', g.powderId); IB.primer = live('primers', g.primerId); IB.charge = String(g.charge); IB.case = live('cases', g.caseId); viewAllKeepScroll(); }
     }
     else if (['ib-bullet', 'ib-powder', 'ib-primer', 'ib-case'].includes(id)) { IB[id.slice(3)] = v; sum(); }
     else if (['ib-charge', 'ib-rounds', 'ib-date'].includes(id)) { IB[id.slice(3)] = v.trim(); sum(); }
@@ -1930,7 +2010,8 @@ document.addEventListener('input', (e) => {
     if (id === 'cc-rid') { CC.rid = v; CC.all = false; viewAllKeepScroll(); }
     else if (id === 'cc-fill') {
       const g = v && S.groups.filter((x) => x.rifleId === CC.rid && [x.bulletId, x.powderId, Number(x.charge), x.primerId].join('|') === v).sort((a, b) => b.ts - a.ts)[0];
-      if (g) { CC.bullet = g.bulletId; CC.powder = g.powderId; CC.primer = g.primerId; CC.charge = String(g.charge); CC.case = g.caseId && byId('cases', g.caseId) ? g.caseId : ''; viewAllKeepScroll(); }
+      const live = (s, id) => (id && byId(s, id) && !byId(s, id).archived ? id : ''); // an archived part is not filled in
+      if (g) { CC.bullet = live('bullets', g.bulletId); CC.powder = live('powders', g.powderId); CC.primer = live('primers', g.primerId); CC.charge = String(g.charge); CC.case = live('cases', g.caseId); viewAllKeepScroll(); }
     }
     else if (id === 'cc-charge') { CC.charge = v.trim(); const o = $('#cc-out'); if (o) o.innerHTML = ccResult(); }
     else if (id.startsWith('cc-m-')) { const [, , kind, field] = id.split('-'); CC.m[kind][field] = v.trim(); const o = $('#cc-out'); if (o) o.innerHTML = ccResult(); }
@@ -1938,6 +2019,8 @@ document.addEventListener('input', (e) => {
   } else if (e.target.id && e.target.id.startsWith('lc-')) { // Load check: patch the result in place so typing keeps focus
     LC[e.target.id.slice(3).replace('rid', 'rid')] = e.target.value.trim();
     if (e.target.id === 'lc-rid') viewAllKeepScroll(); else { const o = $('#lc-out'); if (o) o.innerHTML = lcResult(); }
+  } else if (e.target.id === 'cm-q') { // Components search: patch the list in place so typing keeps focus
+    CM.q = e.target.value; const l = $('#cm-list'); if (l) l.innerHTML = cmListHtml();
   } else if (e.target.id === 'cr-tol') {
     const v = num(e.target.value); CR.tol = v !== null && v >= 0 ? v : 0;
     crSave(); crRefresh();
@@ -1973,6 +2056,8 @@ document.addEventListener('change', (e) => {
     const n = num($('#cost-tax').value), cur = $('#cost-cur').value.trim() || 'CAD';
     put('prefs', { id: 'cost', tax: n !== null && n >= 0 ? n : 12, currency: cur }).then(() => { $('#cost-tax').value = taxPct(); $('#cost-cur').value = curLabel(); });
   }
+  if (e.target.id === 'cm-cal') { CM.cal = e.target.value; const l = $('#cm-list'); if (l) l.innerHTML = cmListHtml(); }
+  if (e.target.id === 'cm-arch') { CM.arch = e.target.checked; const l = $('#cm-list'); if (l) l.innerHTML = cmListHtml(); }
   if (e.target.id === 'cc-allcase') { CC.all = e.target.checked; viewAllKeepScroll(); }
   if (e.target.id === 'ib-allcase') { IB.all = e.target.checked; viewAllKeepScroll(); }
   if (e.target.id === 'ib-deduct') { IB.deduct = e.target.checked; const s = $('#ib-sum'); if (s) s.innerHTML = ibSummaryHtml(ibLines(), 'Summary'); }
